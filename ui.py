@@ -1,7 +1,7 @@
 """Small Gradio UI for the EU Taxonomy FAQ RAG chatbot.
 
 Reuses ``app.answer_question`` for the full retrieve->rerank->generate path. If
-``ANTHROPIC_API_KEY`` is not set we fall back to a retrieval-only view so the UI
+``OPENAI_API_KEY`` is not set we fall back to a retrieval-only view so the UI
 is still useful for reviewers without a key.
 
 Run::
@@ -23,13 +23,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "experiments" / "default.yaml"
 
 NO_KEY_BANNER = (
-    "**Set `ANTHROPIC_API_KEY` to enable answer generation.** "
+    "**Set `OPENAI_API_KEY` to enable answer generation.** "
     "Showing retrieved FAQ entries only."
 )
-NO_KEY_ANSWER = "[generation disabled - set ANTHROPIC_API_KEY]"
+NO_KEY_ANSWER = "[generation disabled - set OPENAI_API_KEY]"
 FLOOR_NOTE = (
     "_Refusal floor tripped: top-1 similarity below `tau_low` - "
-    "no Claude call was made._"
+    "no LLM call was made._"
 )
 
 
@@ -59,7 +59,7 @@ class UIState:
         self.retriever = Retriever(self.config["name"])
 
     def has_key(self) -> bool:
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+        return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def ask(state: UIState, query: str) -> tuple[str, str, str]:

@@ -120,17 +120,18 @@ Three prompt variants for the experimentation matrix:
 
 ---
 
-## 7. Anthropic call shape
+## 7. OpenAI-compatible chat-completions call shape
 
-- **Model.** `claude-sonnet-4-6` (default). Sonnet is the right speed/quality point for a take-home; Opus is overkill for this domain (no deep reasoning needed, only faithful synthesis), Haiku risks faithfulness slippage on longer contexts.
-- **Prompt-caching layout.**
-  - System prompt → **cached** (`cache_control: {"type": "ephemeral"}` on the last system block). System prompt is stable across queries; saves ~400 input tokens × N queries during eval runs.
-  - Retrieved-context block → **not cached** in production (it changes every query — cache writes cost more than they save). **Cached during eval** if and only if we run identical queries repeatedly across configs (we don't — each config has different retrievals — so default to no-cache).
-  - User question → not cached.
-- **`max_tokens`**: 600. FAQ answers are short; this is a hard ceiling that catches runaway generations.
-- **`temperature`**: 0. Determinism is essential for eval reproducibility. Unsetting to 0.2 is acceptable as a polish-pass variant if reviewers want to see hedging behaviour, but the headline numbers are at 0.
-- **`stop_sequences`**: none required.
-- **Streaming.** Off in eval (we need the whole answer for grading), on in CLI/UI for UX.
+The backend is **provider-agnostic** via the OpenAI SDK. `base_url` is configurable per-config (or via `OPENAI_BASE_URL`) so the same code targets OpenAI proper, Azure OpenAI, OpenRouter, Together, Groq, LM Studio, Ollama, vLLM, etc. Reviewers swap providers by setting one env var or one YAML field — no code change.
+
+- **Model.** `gpt-4o-mini` (default). Cheap, widely available, fast, and supported by every OpenAI-compatible provider. For higher-fidelity LLM-as-judge runs, swap to `gpt-4o` or any stronger model your provider exposes by setting `generation.model` in the YAML.
+- **Prompt-prefix caching.** No explicit `cache_control` parameter exists in the OpenAI Chat Completions API. Providers that support prefix caching (OpenAI proper at ≥1024-token prefixes; some others) handle it automatically. The system prompt sits at the start of every call so it is the natural cacheable prefix; the retrieved-context block lives in the user message and varies per query.
+- **`max_tokens`**: 600. FAQ answers are short; this is a hard ceiling that catches runaway generations. (Some newer reasoning models prefer `max_completion_tokens`; we keep `max_tokens` for broad provider compatibility.)
+- **`temperature`**: 0. Determinism is essential for eval reproducibility.
+- **`messages` shape**: a `system` message with the prompt content, followed by a `user` message containing the `<context>...</context>` block plus the question.
+- **Streaming.** Off in eval (we need the whole answer for grading); enabling streaming in CLI/UI is a small follow-up.
+
+A side benefit of the OpenAI-compatible abstraction: the LLM-as-judge step in Phase 4b reuses the same `Generator` class (different `model` and `prompt_path`) regardless of where the judge ultimately runs.
 
 ---
 
@@ -138,10 +139,10 @@ Three prompt variants for the experimentation matrix:
 
 **Two-layer design, evaluated as one.**
 
-1. **Soft floor at retrieval.** Compute the max similarity score of the top-1 chunk. If it falls below `tau_low` (calibrated, expected ~0.30–0.40 for `bge-small`, model-specific), short-circuit and emit the canonical refusal *without* calling Claude. This handles obvious off-topic queries cheaply ("what's the weather in Paris?").
-2. **Model-side refusal.** For all other queries, pass top-k context to Claude with the prompt invariants from §6. The model is the final arbiter — it can refuse even on high-similarity matches if the retrieved text doesn't actually answer the user's question (common when a query is in-domain but its specific angle isn't covered).
+1. **Soft floor at retrieval.** Compute the max similarity score of the top-1 chunk. If it falls below `tau_low` (calibrated, expected ~0.30–0.40 for `bge-small`, model-specific), short-circuit and emit the canonical refusal *without* calling the LLM. This handles obvious off-topic queries cheaply ("what's the weather in Paris?").
+2. **Model-side refusal.** For all other queries, pass top-k context to the LLM with the prompt invariants from §6. The model is the final arbiter — it can refuse even on high-similarity matches if the retrieved text doesn't actually answer the user's question (common when a query is in-domain but its specific angle isn't covered).
 
-**Why both, not just (2).** Without the floor, Claude sees nonsense context for off-topic queries and occasionally hallucinates a plausible-sounding refusal-rationale rather than the canonical refusal string. Floor enforces the canonical string.
+**Why both, not just (2).** Without the floor, the LLM sees nonsense context for off-topic queries and occasionally hallucinates a plausible-sounding refusal-rationale rather than the canonical refusal string. Floor enforces the canonical string.
 
 **Why not just (1).** Threshold-only refusal can't catch cases where retrieval surfaces a related-but-inadequate FAQ — only the model can read the entry and decide it doesn't answer the question.
 
@@ -157,16 +158,16 @@ Three prompt variants for the experimentation matrix:
 
 Per-query, order-of-magnitude. Assume ~80-token user question, ~3,000 tokens of retrieved context (top-5 chunks), ~250-token answer.
 
-| Config | Embed | Retrieve | Rerank | Generate (Sonnet 4.6) | Total latency | Cost / query |
+| Config | Embed | Retrieve | Rerank | Generate (`gpt-4o-mini`) | Total latency | Cost / query |
 |---|---|---|---|---|---|---|
-| **Default** (`bge-small`, dense, no rerank) | ~10 ms (CPU) | <1 ms (numpy) | — | ~1.5–3 s (Sonnet, streaming) | **~1.5–3 s** | ~$0.012 (input ~$0.009, output ~$0.004) |
-| **Max** (`voyage-3-large`, hybrid + reranker, Sonnet 4.6) | ~80–150 ms (API) | <2 ms (numpy + BM25) | ~80 ms (CPU reranker) | ~1.5–3 s | **~1.7–3.3 s** | ~$0.013 (Voyage adds < $0.0001/query; rest unchanged) |
+| **Default** (`bge-small`, dense, no rerank) | ~10 ms (CPU) | <1 ms (numpy) | — | ~0.7–1.5 s | **~0.7–1.5 s** | ~$0.0006 (input ~$0.00045, output ~$0.00015) |
+| **Max** (`voyage-3-large`, hybrid + reranker, `gpt-4o-mini`) | ~80–150 ms (API) | <2 ms (numpy + BM25) | ~80 ms (CPU reranker) | ~0.7–1.5 s | **~0.9–1.7 s** | ~$0.0007 (Voyage adds < $0.0001/query; rest unchanged) |
 
 Index build cost (one-off): ~200k tokens × $0.18/1M = **~$0.04 with Voyage**, $0 local. Negligible.
 
-Eval cost: 100 cases × ~$0.012 × ~12 configs = **~$15 total** for the full matrix. This is well within take-home budget.
+Eval cost: 100 cases × ~$0.0006 × ~12 configs = **<$1 total** for the full matrix at `gpt-4o-mini` rates. Pricier providers (e.g. `gpt-4o`, `claude-3.5-sonnet` via OpenRouter) scale linearly; budget accordingly.
 
-Latency dominator is Claude generation, not retrieval. Worth knowing — retrieval optimisation has a tiny ceiling.
+Latency dominator is the LLM call, not retrieval. Worth knowing — retrieval optimisation has a tiny ceiling.
 
 ---
 
@@ -179,7 +180,7 @@ Latency dominator is Claude generation, not retrieval. Worth knowing — retriev
 If hit@5 ≥ 0.85, fine-tune is **skipped** — the marginal lift cannot justify the engineering cost, and generation quality (faithfulness, refusal) becomes the bottleneck instead.
 
 **If triggered:**
-- Generate ~1,000 synthetic queries by prompting Claude with each FAQ chunk: "produce 3 paraphrased questions a user might ask, only answerable from this entry."
+- Generate ~1,000 synthetic queries by prompting the configured LLM with each FAQ chunk: "produce 3 paraphrased questions a user might ask, only answerable from this entry."
 - Train with MNRL (multiple-negatives ranking loss) on `bge-small`, batch size 32, ~3 epochs, LR 2e-5. Hold out 10% of FAQs entirely (their synthetic queries become a true test set, not seen during training).
 - Re-evaluate. **Promote** if hit@5 lifts ≥ 5 percentage points on the held-out FAQs (not the seen ones — that would be leakage).
 
@@ -196,7 +197,7 @@ If hit@5 ≥ 0.85, fine-tune is **skipped** — the marginal lift cannot justify
 5. **Refusal floor check.** If top-1 similarity < `tau_low`, return canonical refusal string and stop. No LLM call.
 6. **Rerank** (if enabled) with `bge-reranker-v2-m3`: score `(query, chunk_text)` pairs, take top-5.
 7. **Assemble context.** Format top-5 chunks as `<context><doc id="…" section="…">…text…</doc>…</context>`, preserving section heading and question line so the model can cite.
-8. **Generate.** Call Anthropic Sonnet 4.6 with cached system prompt + uncached context + user question. `max_tokens=600`, `temperature=0`.
+8. **Generate.** Call the configured OpenAI-compatible chat-completions endpoint (default `gpt-4o-mini`) with the system prompt + user message containing context + question. `max_tokens=600`, `temperature=0`. Prefix caching, where the provider supports it, is automatic.
 9. **Post-process.** Light validation: did the model produce the citation block? If not (rare at temperature 0), regenerate once with an explicit "remember to cite" suffix, then return whatever comes out.
 10. **Return** answer text + cited chunk IDs (for UI display and eval logging).
 
@@ -267,11 +268,11 @@ If hit@5 ≥ 0.85, fine-tune is **skipped** — the marginal lift cannot justify
                           └────────┬─────────┘
                                    ▼
               ┌────────────────────────────────────────┐
-              │ Anthropic claude-sonnet-4-6            │
-              │  - system prompt (cached)              │
-              │  - context block (uncached)            │
-              │  - user question                       │
-              │  - max_tokens=600, temperature=0       │
+              │ OpenAI-compatible chat completion       │
+              │  default: gpt-4o-mini  (base_url=any)   │
+              │  - system prompt (cacheable prefix)     │
+              │  - <context> + question (user message)  │
+              │  - max_tokens=600, temperature=0        │
               └────────────────────┬───────────────────┘
                                    ▼
                           ┌──────────────────┐

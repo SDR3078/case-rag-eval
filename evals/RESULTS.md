@@ -4,7 +4,7 @@
 
 This file reports the **retrieval-only** portion of the experiment matrix from `docs/01_architecture.md`. Metrics measured here: hit@1 / hit@3 / hit@5 (any-match), hit@5 (all-match for multi-FAQ cases), MRR, plus build-time and per-query latency. The 64 in-scope cases (golden_path + multi_faq + adversarial) drive the headline numbers. The 8 OOS cases have their top-1 similarity captured for later `tau_low` calibration.
 
-Generation, LLM-as-judge faithfulness/correctness, ROUGE-L, refusal precision/recall, and `tau_low` calibration are deferred to Phase 4b because `ANTHROPIC_API_KEY` is not set. See `DEFERRED.md` for the resume plan and expected cost (~$15-20).
+Generation, LLM-as-judge faithfulness/correctness, ROUGE-L, refusal precision/recall, and `tau_low` calibration are deferred to Phase 4b until `OPENAI_API_KEY` (or any OpenAI-compatible endpoint) is configured. See `DEFERRED.md` for the resume plan.
 
 Voyage AI was excluded from the embedding axis because `VOYAGE_API_KEY` is not set; bge-small vs. bge-large still gives us a clean within-family comparison. Voyage can be added later by dropping a YAML into `experiments/` (see `bge_large_hybrid_rerank.yaml` for a non-default-embedding template).
 
@@ -81,7 +81,7 @@ With only 8 adversarial cases the per-config differences are 1-2 cases each; the
 
 ## 8. Generation results (Phase 4b - TBD)
 
-Once `ANTHROPIC_API_KEY` is set we will run generation across the top-2 / top-3 retrieval configs by hit@5_any, crossed with the three prompt variants in `prompts/`.
+Once `OPENAI_API_KEY` is set (and optionally `OPENAI_BASE_URL` to point at a non-OpenAI provider) we will run generation across the top-2 / top-3 retrieval configs by hit@5_any, crossed with the three prompt variants in `prompts/`.
 
 | retrieval config | prompt | faithfulness | correctness | ROUGE-L | refusal P | refusal R |
 |---|---|---:|---:|---:|---:|---:|

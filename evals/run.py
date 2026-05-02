@@ -233,9 +233,9 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
     name = config["name"]
     print(f"\n[run] === config: {name} ({config_path.name}) ===", flush=True)
 
-    if full and not os.environ.get("ANTHROPIC_API_KEY"):
+    if full and not os.environ.get("OPENAI_API_KEY"):
         raise SystemExit(
-            "--full requires ANTHROPIC_API_KEY (Phase 4b). "
+            "--full requires OPENAI_API_KEY (Phase 4b). "
             "Re-run with --retrieval-only or see DEFERRED.md."
         )
 
@@ -312,7 +312,8 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
 
     if full:
         # Generation + LLM-as-judge + refusal P/R: deferred to Phase 4b.
-        # TBD: requires ANTHROPIC_API_KEY. See DEFERRED.md.
+        # TBD: requires OPENAI_API_KEY (or any OpenAI-compatible endpoint via
+        # OPENAI_BASE_URL). See DEFERRED.md.
         raise NotImplementedError(
             "Generation / judge / refusal scoring deferred to Phase 4b - see DEFERRED.md"
         )
@@ -347,8 +348,8 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
 _DEFERRED_NOTE = (
     "Generation, LLM-as-judge faithfulness/correctness, ROUGE-L, refusal "
     "precision/recall, and `tau_low` calibration are deferred to Phase 4b "
-    "because `ANTHROPIC_API_KEY` is not set. See `DEFERRED.md` for the "
-    "resume plan and expected cost (~$15-20)."
+    "until `OPENAI_API_KEY` (or any OpenAI-compatible endpoint via "
+    "`OPENAI_BASE_URL`) is configured. See `DEFERRED.md` for the resume plan."
 )
 
 
@@ -497,7 +498,8 @@ def _emit_results_md(summaries: list[dict]) -> str:
     lines.append("## 8. Generation results (Phase 4b - TBD)")
     lines.append("")
     lines.append(
-        "Once `ANTHROPIC_API_KEY` is set we will run generation across the "
+        "Once `OPENAI_API_KEY` is set (and optionally `OPENAI_BASE_URL` to "
+        "point at a non-OpenAI provider) we will run generation across the "
         "top-2 / top-3 retrieval configs by hit@5_any, crossed with the "
         "three prompt variants in `prompts/`."
     )
@@ -776,7 +778,7 @@ def main(argv: list[str] | None = None) -> int:
                       help="Phase 4a: retrieval metrics only (default).")
     mode.add_argument("--full", action="store_true",
                       help="Phase 4b: also run generation + judge + refusal. "
-                           "Requires ANTHROPIC_API_KEY (NotImplementedError today).")
+                           "Requires OPENAI_API_KEY (NotImplementedError today).")
     parser.add_argument("--cases", default=str(DEFAULT_CASES),
                         help="Path to cases.jsonl (default: evals/cases.jsonl).")
     args = parser.parse_args(argv)

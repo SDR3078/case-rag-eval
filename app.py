@@ -63,7 +63,7 @@ def _build_pipeline(config: dict):
         prompt_path=config["prompt"]["path"],
         max_tokens=gen_cfg.get("max_tokens", 600),
         temperature=gen_cfg.get("temperature", 0.0),
-        prompt_caching=gen_cfg.get("prompt_caching", True),
+        base_url=gen_cfg.get("base_url"),
     )
     return retriever, reranker, generator
 
@@ -75,7 +75,7 @@ def answer_question(query: str, config: dict) -> dict:
     tuples), `top1_score`, `refused_at_floor` (bool), and `usage` (token info,
     or `None` if the floor short-circuited the LLM call).
 
-    Side effects: one Anthropic API call (unless the refusal floor triggers).
+    Side effects: one chat-completion API call (unless the refusal floor triggers).
     """
     query = _validate_query(query)
     retriever, reranker, generator = _build_pipeline(config)

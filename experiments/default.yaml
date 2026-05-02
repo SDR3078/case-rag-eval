@@ -29,7 +29,7 @@ retrieval:
   # Over-retrieve when a reranker is on; ignored otherwise.
   k_pre_rerank: 20
   # Refusal floor on the top-1 similarity. Below this, we short-circuit and
-  # return the canonical refusal without calling Claude.
+  # return the canonical refusal without calling the LLM.
   tau_low: 0.30
 
 reranker:
@@ -41,7 +41,10 @@ prompt:
   path: prompts/system_v1.md
 
 generation:
-  model: claude-sonnet-4-6
+  # Any OpenAI-compatible chat-completions model id. Override via this field
+  # or the OPENAI_BASE_URL env var to point at OpenRouter, Together, Groq,
+  # Azure OpenAI, LM Studio, Ollama, vLLM, etc.
+  model: gpt-4o-mini
+  # base_url: https://openrouter.ai/api/v1   # example override
   max_tokens: 600
   temperature: 0
-  prompt_caching: true

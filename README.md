@@ -21,8 +21,10 @@ results.
    BM25 / persistence) is small and independent.
 4. **`retriever.py`** — dense / BM25 / hybrid (RRF k=60) retrieval over a
    persisted index. Small.
-5. **`generator.py`** — Anthropic call with **prompt caching enabled** on the
-   system prompt; refusal-floor short-circuit handled in `app.py`.
+5. **`generator.py`** — OpenAI-compatible chat-completions call (`base_url`
+   configurable, so any provider works: OpenAI, Azure, OpenRouter, Together,
+   Groq, LM Studio, Ollama, vLLM). Prompt-prefix caching is automatic on
+   providers that support it. Refusal-floor short-circuit is in `app.py`.
 6. **`evals/cases.jsonl`** + `evals/README.md` — 80 hand-curated cases
    (60 % golden, 20 % multi-FAQ synthesis, 10 % adversarial, 10 % out-of-scope)
    with sourcing methodology.
@@ -38,8 +40,12 @@ source .venv/bin/activate
 # Install hard dependencies
 pip install -r requirements.txt
 
-# Anthropic API key (required for generation, not for retrieval-only evals)
-export ANTHROPIC_API_KEY=sk-ant-...
+# OpenAI-compatible API key (required for generation, not for retrieval-only evals)
+export OPENAI_API_KEY=sk-...
+# Optional: point at any OpenAI-compatible endpoint (Azure, OpenRouter,
+# Together, Groq, LM Studio at http://localhost:1234/v1, Ollama at
+# http://localhost:11434/v1, vLLM, etc.). Leave unset for OpenAI proper.
+# export OPENAI_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 Optional extras (only needed for some configs):
@@ -74,7 +80,7 @@ python -m app --config experiments/embed_bge_large.yaml "..."
 
 If the top-1 retrieval similarity falls below the configured `tau_low`, the
 pipeline short-circuits and returns the canonical refusal
-(`I don't know based on the provided FAQs.`) without calling Claude.
+(`I don't know based on the provided FAQs.`) without calling the LLM.
 
 ## Web UI (optional)
 
@@ -84,8 +90,8 @@ pip install -r requirements-optional.txt
 ```
 
 Opens a small Gradio surface at the URL it prints (usually
-`http://127.0.0.1:7860`). If `ANTHROPIC_API_KEY` is unset the UI degrades to
-retrieval-only and shows the top-5 FAQ matches without calling Claude.
+`http://127.0.0.1:7860`). If `OPENAI_API_KEY` is unset the UI degrades to
+retrieval-only and shows the top-5 FAQ matches without calling the LLM.
 
 ## Run the experiment matrix
 
@@ -103,7 +109,7 @@ python -m evals.run --all --retrieval-only
 
 Results (per-case raw + aggregated summary) land in `evals/results/`;
 [`evals/RESULTS.md`](evals/RESULTS.md) is regenerated from the merged set on
-each run. Generation + LLM-as-judge metrics are gated on `ANTHROPIC_API_KEY`
+each run. Generation + LLM-as-judge metrics are gated on `OPENAI_API_KEY`
 and described in [`DEFERRED.md`](DEFERRED.md).
 
 ## Results in 30 seconds
@@ -159,7 +165,7 @@ Assumptions worth flagging to the reviewer:
 
 In approximate order of expected return per hour of effort:
 
-1. **Set `ANTHROPIC_API_KEY` and run Phase 4b** — generation faithfulness,
+1. **Set `OPENAI_API_KEY` and run Phase 4b** — generation faithfulness,
    correctness (LLM-as-judge), ROUGE-L baseline, refusal precision/recall on
    the 8 OOS cases, and `tau_low` calibration. This is the most consequential
    gap remaining; ~$15-20 in API and ~30 min wall clock.
@@ -180,10 +186,11 @@ In approximate order of expected return per hour of effort:
 6. **Embedding fine-tune** (Phase 5) becomes interesting *only if* a real-user
    eval set drops hit@5 below the 0.85 trigger threshold. The fine-tune
    pipeline is sketched in `DEFERRED.md`.
-7. **Caching of full retrieved-context blocks** in the Anthropic call — the
-   current build only caches the system prompt because the retrieved context
-   varies per query. For repeated near-duplicate queries (a real production
-   pattern) a chunk-level cache could pay off.
+7. **Caching of full retrieved-context blocks** — the current build relies on
+   the provider's automatic prefix caching, which only catches the system
+   prompt because the retrieved context varies per query. For repeated
+   near-duplicate queries (a real production pattern) a chunk-level cache or
+   semantic-cache layer could pay off.
 
 ## Project layout
 
@@ -191,7 +198,7 @@ In approximate order of expected return per hour of effort:
 ingest.py           load + chunk + embed + BM25 → index/{name}/
 retriever.py        dense / BM25 / hybrid (RRF) retrieval over a persisted index
 reranker.py         optional cross-encoder reranker (noop default)
-generator.py        Anthropic call with cached system prompt
+generator.py        OpenAI-compatible chat call (configurable base_url)
 app.py              CLI entrypoint
 ui.py               minimal Gradio web UI (optional)
 prompts/            system prompts (v1 / v2 / v3 — git-tracked iterations)
