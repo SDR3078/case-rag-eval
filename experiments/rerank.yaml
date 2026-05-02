@@ -1,0 +1,39 @@
+# Reranker sweep: dense → cross-encoder rerank with bge-reranker-v2-m3. Other axes
+# at baseline (per-question chunking, bge-small, dense, prompt v1). Pre-rerank top-20
+# narrowed to top-5 by the cross-encoder.
+# Goal: measure the marginal lift of a cross-encoder against the cheap dense baseline
+# (architecture §5). Promote rule: > +5 pp on hit@5 → reranker becomes default.
+
+name: rerank
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  strategy: per_question
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  backend: bge_small
+  batch_size: 32
+
+retrieval:
+  method: dense
+  k: 5
+  k_pre_rerank: 20
+  tau_low: 0.30
+
+reranker:
+  model: BAAI/bge-reranker-v2-m3
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  model: claude-sonnet-4-6
+  max_tokens: 600
+  temperature: 0
+  prompt_caching: true

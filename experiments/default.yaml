@@ -1,0 +1,47 @@
+# Default RAG config — see docs/01_architecture.md for the design rationale.
+# This is the baseline cited as "Default" in the cost/latency table:
+# bge-small-en-v1.5 dense retrieval, no reranker, prompt v1.
+
+name: default
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  # Strategies: per_question | per_question_with_section | per_question_with_section_split_long
+  strategy: per_question
+  # Only used when strategy includes split_long; max tokens before sliding-window split.
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  # Backends: bge_small | bge_large | voyage_3_large
+  backend: bge_small
+  # Optional override for the underlying HF model id (defaults are sensible).
+  # model: BAAI/bge-small-en-v1.5
+  batch_size: 32
+
+retrieval:
+  # Methods: dense | bm25 | hybrid
+  method: dense
+  k: 5
+  # Over-retrieve when a reranker is on; ignored otherwise.
+  k_pre_rerank: 20
+  # Refusal floor on the top-1 similarity. Below this, we short-circuit and
+  # return the canonical refusal without calling Claude.
+  tau_low: 0.30
+
+reranker:
+  # null = noop. Otherwise an HF cross-encoder id, e.g. BAAI/bge-reranker-v2-m3
+  model: null
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  model: claude-sonnet-4-6
+  max_tokens: 600
+  temperature: 0
+  prompt_caching: true

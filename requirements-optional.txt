@@ -1,0 +1,7 @@
+# Optional extras. Install only when running configs that need them.
+# Voyage AI embedding backend (`embedding.backend: voyage_3_large`)
+voyageai>=0.3,<1.0
+# bge-reranker-v2-m3 cross-encoder is loaded via sentence-transformers,
+# which is already a hard dep, so no extra package is required for the reranker.
+# Gradio web UI (`python ui.py`)
+gradio>=4.0

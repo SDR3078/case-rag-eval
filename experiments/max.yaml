@@ -1,0 +1,39 @@
+# Best-of-axes "max" config: section-prepended chunking + outlier splitting +
+# bge-large embeddings + hybrid (dense+BM25, RRF) + cross-encoder reranker.
+# This stacks every axis lift the matrix surfaces. Sister config
+# `bge_large_hybrid_rerank.yaml` does the same minus split_long, so the pair lets
+# us isolate whether splitting helps on top of an already strong stack.
+
+name: max
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  strategy: per_question_with_section_split_long
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  backend: bge_large
+  batch_size: 16
+
+retrieval:
+  method: hybrid
+  k: 5
+  k_pre_rerank: 20
+  tau_low: 0.30
+
+reranker:
+  model: BAAI/bge-reranker-v2-m3
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  model: claude-sonnet-4-6
+  max_tokens: 600
+  temperature: 0
+  prompt_caching: true

@@ -1,0 +1,38 @@
+# Embedding sweep: swap bge-small → bge-large with everything else held at baseline
+# (per-question chunking, dense, no rerank, prompt v1).
+# Goal: isolate "model size" as the variable while holding the family constant
+# (architecture §2). bge-large is ~10x bge-small in params, ~3x dim.
+
+name: embed_bge_large
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  strategy: per_question
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  backend: bge_large
+  batch_size: 16
+
+retrieval:
+  method: dense
+  k: 5
+  k_pre_rerank: 20
+  tau_low: 0.30
+
+reranker:
+  model: null
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  model: claude-sonnet-4-6
+  max_tokens: 600
+  temperature: 0
+  prompt_caching: true

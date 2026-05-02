@@ -1,0 +1,38 @@
+# Retrieval sweep: hybrid dense + BM25 with Reciprocal Rank Fusion (k=60). Other axes
+# at baseline (per-question chunking, bge-small, no rerank, prompt v1).
+# Goal: test whether RRF fusion materially beats either component alone on this corpus
+# (architecture §4). RRF needs no tunable weight.
+
+name: retrieval_hybrid
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  strategy: per_question
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  backend: bge_small
+  batch_size: 32
+
+retrieval:
+  method: hybrid
+  k: 5
+  k_pre_rerank: 20
+  tau_low: 0.30
+
+reranker:
+  model: null
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  model: claude-sonnet-4-6
+  max_tokens: 600
+  temperature: 0
+  prompt_caching: true
