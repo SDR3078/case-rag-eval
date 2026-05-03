@@ -146,8 +146,30 @@ def _load_yaml(path: Path) -> dict:
 
 
 def _list_configs() -> list[Path]:
-    """Every YAML in experiments/, sorted for deterministic order."""
-    return sorted(EXPERIMENTS_DIR.glob("*.yaml"))
+    """Every YAML in experiments/, sorted, deduped by `name`.
+
+    Multiple YAMLs may share a `name` (e.g. `groq.yaml` reuses `name: default`
+    to share the index dir; only its `generation:` block differs). For `--all`
+    we keep just the lexicographically first such YAML, so a matrix run
+    doesn't silently overwrite earlier rows in `summary.json`. Use `--config`
+    to target a specific YAML by path when names collide.
+    """
+    paths = sorted(EXPERIMENTS_DIR.glob("*.yaml"))
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for p in paths:
+        with p.open("r", encoding="utf-8") as f:
+            name = (yaml.safe_load(f) or {}).get("name")
+        if name in seen:
+            print(
+                f"[run] note: skipping {p.name} (name={name!r} already taken "
+                f"by an earlier YAML); use --config to target it directly.",
+                flush=True,
+            )
+            continue
+        seen.add(name)
+        deduped.append(p)
+    return deduped
 
 
 # --- Per-config runner -----------------------------------------------------

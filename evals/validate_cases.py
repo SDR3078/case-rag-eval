@@ -23,6 +23,13 @@ ALLOWED_BEHAVIOURS = {"answer", "refuse"}
 def main() -> int:
     """Validate cases.jsonl; return 0 on success, 1 on any failure."""
     errors: list[str] = []
+    if not CHUNKS.is_file():
+        print(
+            f"error: {CHUNKS} not found. Build the default index first:\n"
+            f"  .venv/bin/python -m ingest --config experiments/default.yaml",
+            file=sys.stderr,
+        )
+        return 1
     chunk_ids = {json.loads(line)["id"] for line in CHUNKS.read_text().splitlines() if line.strip()}
     seen_ids: set[str] = set()
     by_category: Counter[str] = Counter()
