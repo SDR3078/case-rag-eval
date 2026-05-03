@@ -78,6 +78,34 @@ Switch configs:
 python -m app --config experiments/embed_bge_large.yaml "..."
 ```
 
+### Switching providers (Groq, OpenAI, OpenRouter, local LLMs)
+
+The generator backend is provider-agnostic. Each experiment YAML can pin a
+`generation.base_url` and `generation.model`; the same `OPENAI_API_KEY` env
+var holds whichever provider's key is in play (the OpenAI SDK sends it as
+`Authorization: Bearer …`, no matter the upstream).
+
+`experiments/groq.yaml` ships as a worked example pointing at
+`https://api.groq.com/openai/v1` with `llama-3.3-70b-versatile`. To use it:
+
+```bash
+export OPENAI_API_KEY=<your-groq-key>
+python -m app --config experiments/groq.yaml "What does Article 8 require?"
+```
+
+To target other providers, copy `experiments/groq.yaml` and change the two
+fields under `generation:`:
+
+| Provider | `base_url` | sample `model` |
+|---|---|---|
+| OpenAI proper | (omit; default) | `gpt-4o-mini` |
+| Azure OpenAI | `https://<resource>.openai.azure.com/openai/deployments/<dep>` | (deployment name) |
+| OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-3.5-sonnet` |
+| Together AI | `https://api.together.xyz/v1` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
+| LM Studio (local) | `http://localhost:1234/v1` | (whatever you loaded) |
+| Ollama (local) | `http://localhost:11434/v1` | `llama3.3` |
+| vLLM (local) | `http://localhost:8000/v1` | (served model id) |
+
 If the top-1 retrieval similarity falls below the configured `tau_low`, the
 pipeline short-circuits and returns the canonical refusal
 (`I don't know based on the provided FAQs.`) without calling the LLM.

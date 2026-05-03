@@ -1,0 +1,48 @@
+# Groq provider profile — same retrieval pipeline as default.yaml, generator
+# pointed at Groq's OpenAI-compatible endpoint.
+#
+# Run:  export OPENAI_API_KEY=<your-groq-key>
+#       python -m app --config experiments/groq.yaml "your question"
+#
+# The eval runner needs its own index dir (we never built `index/groq/`), so
+# `name` is set to `default` to reuse the bge-small-en-v1.5 index already on
+# disk. Only the generation block differs from default.yaml.
+
+name: default
+
+corpus:
+  path: docs/taxonomy_faqs_cleaned.md
+
+chunking:
+  strategy: per_question
+  split_long_threshold_tokens: 800
+  split_window_tokens: 600
+  split_overlap_tokens: 100
+
+embedding:
+  backend: bge_small
+  batch_size: 32
+
+retrieval:
+  method: dense
+  k: 5
+  k_pre_rerank: 20
+  tau_low: 0.30
+
+reranker:
+  model: null
+  top_k: 5
+
+prompt:
+  path: prompts/system_v1.md
+
+generation:
+  # Groq serves a Llama family + a few others through an OpenAI-compatible API.
+  # Alternatives worth swapping in:
+  #   llama-3.1-8b-instant          — much faster, lower fidelity
+  #   deepseek-r1-distill-llama-70b — reasoning-tuned (verbose)
+  #   qwen/qwen3-32b                — strong general model
+  model: llama-3.3-70b-versatile
+  base_url: https://api.groq.com/openai/v1
+  max_tokens: 600
+  temperature: 0
