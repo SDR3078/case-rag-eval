@@ -2,32 +2,37 @@
 
 Usage
 -----
-Single config:
+Single config (retrieval only):
     .venv/bin/python -m evals.run --config experiments/default.yaml --retrieval-only
+
+Single config with generation, judge, ROUGE-L, refusal P/R:
+    OPENAI_API_KEY=... .venv/bin/python -m evals.run --config experiments/groq.yaml --full
 
 Every config under experiments/:
     .venv/bin/python -m evals.run --all --retrieval-only
 
-Behaviour (Phase 4a, retrieval-only)
-------------------------------------
-- Loads cases from `evals/cases.jsonl` (default; override with --cases).
-- For each in-scope case (`expected_behaviour == "answer"`):
+Behaviour
+---------
+For each in-scope case (`expected_behaviour == "answer"`):
     1. Build the index for this config if `index/{config_name}/` is missing.
-    2. Run retrieval at k=10 (so hit@1 / hit@3 / hit@5 / MRR all share one call).
+    2. Run retrieval at k=10 (so hit@1 / hit@3 / hit@5 / MRR share one call).
     3. Map window chunk IDs to their `parent_id` when present, so split-long
        chunks compare apples-to-apples against the gold IDs in `cases.jsonl`
        (which always reference per-question chunk IDs).
-    4. Apply the configured reranker to the top-k_pre_rerank dense+/-RRF results
-       when `reranker.model` is set.
-- For OOS cases (`expected_behaviour == "refuse"`) in retrieval-only mode: just
-  record top-1 similarity. The refusal P/R metric needs the LLM and is deferred
-  to Phase 4b (see DEFERRED.md).
-- Persists per-config raw results to `evals/results/{config_name}/raw.jsonl`,
-  aggregates to `evals/results/summary.json`, and regenerates `evals/RESULTS.md`.
+    4. Apply the configured reranker when `reranker.model` is set.
+    5. (--full only) Generate an answer through the OpenAI-compatible generator,
+       run the LLM-as-judge for faithfulness + correctness, compute ROUGE-L
+       against the canonical FAQ chunk text(s), record refusal flags.
 
-The `--full` flag is reserved for Phase 4b. It will fail fast with an
-explanatory error pointing at DEFERRED.md until the generation/judge pieces
-are implemented.
+For OOS cases (`expected_behaviour == "refuse"`):
+    - Always record top-1 similarity for `tau_low` calibration.
+    - With --full, also generate (no judge) and record whether the system
+      refused so refusal precision/recall and the tau_low sweep can land in
+      §8 of RESULTS.md.
+
+Per-config raw results go to `evals/results/{config_name}/raw.jsonl`;
+aggregates merge into `evals/results/summary.json`; `evals/RESULTS.md` is
+regenerated from the merged set on every run.
 """
 
 from __future__ import annotations
@@ -52,8 +57,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from ingest import build_index, INDEX_ROOT  # noqa: E402
 from retriever import Retriever  # noqa: E402
 from reranker import Reranker  # noqa: E402
+from generator import CANONICAL_REFUSAL, Generator  # noqa: E402
 
 from evals.metrics import hit_at_k, mrr  # noqa: E402
+from evals.judge import Judge  # noqa: E402
+from evals.rouge import rouge_l_against_chunks  # noqa: E402
 
 # --- Paths -----------------------------------------------------------------
 
@@ -77,11 +85,27 @@ class Case:
     category: str
     question: str
     expected_chunk_ids: list[str]
+    expected_answer_themes: list[str]
     expected_behaviour: str
 
     @property
     def is_in_scope(self) -> bool:
         return self.expected_behaviour == "answer"
+
+
+# `tau_low` values used to compute the floor-only refusal P/R sweep when --full.
+# Architecture §8 calibration grid.
+_TAU_LOW_SWEEP = (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+
+
+def _is_refusal(answer: str) -> bool:
+    """Match the canonical refusal substring case-insensitively.
+
+    The system prompt instructs the model to reply *exactly* with the canonical
+    string when the context doesn't cover the question, so substring match is
+    the right granularity (some models append "Source: ..." after).
+    """
+    return CANONICAL_REFUSAL.lower() in (answer or "").lower()
 
 
 # --- I/O helpers -----------------------------------------------------------
@@ -109,6 +133,7 @@ def _load_cases(path: Path) -> list[Case]:
                     category=d["category"],
                     question=d["question"],
                     expected_chunk_ids=list(d["expected_chunk_ids"]),
+                    expected_answer_themes=list(d.get("expected_answer_themes", [])),
                     expected_behaviour=d["expected_behaviour"],
                 )
             )
@@ -183,6 +208,105 @@ def _retrieve_one(
     return ids, scores, elapsed
 
 
+def _generate_and_judge(
+    case: Case,
+    ids: list[str],
+    scores: list[float],
+    chunks_by_id: dict,
+    generator: Generator,
+    judge: Judge,
+    method: str,
+    tau_low: float,
+) -> dict:
+    """Per case: refusal-floor check, generate, optionally judge, ROUGE-L.
+
+    Returns the dict of new fields to merge into the per-case raw row. The
+    helper handles in-scope (judged) and OOS (not judged, only refusal-detected)
+    uniformly so the calling loop stays small.
+    """
+    # Reconstruct the top-5 RetrievalResult list the generator/judge expect.
+    # The case loop discarded the live RetrievalResult objects; reconstruct
+    # from the cached `chunks_by_id` so the generator sees the same chunks
+    # that retrieval recorded.
+    from retriever import RetrievalResult
+
+    results: list[RetrievalResult] = []
+    for cid, score in zip(ids[:5], scores[:5]):
+        chunk = chunks_by_id.get(cid)
+        if chunk is None:
+            continue
+        results.append(RetrievalResult(chunk=chunk, score=float(score), method="full"))
+
+    top1 = scores[0] if scores else 0.0
+    # Refusal floor only applies to dense (cosine) scores. BM25 and RRF scores
+    # aren't bounded the same way, so the floor is dense-only by design.
+    floor_refused = (method == "dense" and top1 < tau_low)
+
+    out: dict = {"floor_refused": floor_refused}
+
+    if floor_refused:
+        out["answer"] = CANONICAL_REFUSAL
+        out["gen_usage"] = {}
+    else:
+        try:
+            gen_out = generator.generate(case.question, results)
+            out["answer"] = gen_out["answer"]
+            out["gen_usage"] = gen_out["usage"]
+        except Exception as e:
+            out["answer"] = f"[generator error: {type(e).__name__}: {e}]"
+            out["gen_usage"] = {}
+
+    out["model_refused"] = _is_refusal(out["answer"])
+    out["refused"] = floor_refused or out["model_refused"]
+
+    if case.is_in_scope:
+        # In-scope cases are judged on faithfulness + correctness. If the
+        # system refused on an in-scope case, score 0/0 (refusal is the wrong
+        # behaviour for these); skip the judge call to save tokens.
+        if out["refused"]:
+            out["faithfulness"] = 0
+            out["correctness"] = 0
+            out["judge_rationale"] = "system refused on in-scope case"
+        elif out["answer"].startswith("[generator error:"):
+            # Generator hit an API error; the answer is a stub message, not
+            # something the judge can evaluate. Mark unscoreable rather than
+            # spend a judge call on garbage.
+            out["faithfulness"] = -1
+            out["correctness"] = -1
+            out["judge_rationale"] = "generator error — judge skipped"
+        else:
+            try:
+                j = judge.score(
+                    question=case.question,
+                    retrieved=results,
+                    answer=out["answer"],
+                    expected_themes=case.expected_answer_themes,
+                )
+                out["faithfulness"] = j["faithfulness"]
+                out["correctness"] = j["correctness"]
+                out["judge_rationale"] = j["rationale"]
+            except Exception as e:
+                out["faithfulness"] = -1
+                out["correctness"] = -1
+                out["judge_rationale"] = f"judge error: {type(e).__name__}"
+
+        # ROUGE-L against the canonical FAQ chunk text(s). For multi-FAQ cases
+        # the references are concatenated. Refused answers score 0 by fiat.
+        if not out["refused"]:
+            ref_texts = [
+                chunks_by_id[i].text
+                for i in case.expected_chunk_ids
+                if i in chunks_by_id
+            ]
+            out["rouge_l"] = (
+                rouge_l_against_chunks(out["answer"], ref_texts) if ref_texts else 0.0
+            )
+        else:
+            out["rouge_l"] = 0.0
+
+    return out
+
+
 def _summarise(in_scope_results: list[dict], adversarial_results: list[dict]) -> dict:
     """Aggregate per-case retrieval results into a per-config summary block."""
     n_in = len(in_scope_results)
@@ -222,6 +346,94 @@ def _summarise(in_scope_results: list[dict], adversarial_results: list[dict]) ->
     }
 
 
+def _summarise_full(
+    in_scope_results: list[dict],
+    oos_results: list[dict],
+) -> dict:
+    """Aggregate generation metrics from a `--full` run.
+
+    Returns faithfulness/correctness/ROUGE-L means, refusal P/R/F1 over all
+    cases, and a `tau_low` floor-only sweep for refusal calibration. Cells are
+    `None` when generation data is missing (e.g. retrieval-only run).
+    """
+    # Filter to records with judge data (in-scope cases that had generation done).
+    judged = [
+        r for r in in_scope_results
+        if "faithfulness" in r and r["faithfulness"] >= 0
+    ]
+    n_judged = len(judged)
+    rouge_records = [r for r in in_scope_results if "rouge_l" in r]
+    n_rouge = len(rouge_records)
+
+    # Refusal P/R: positive class = "should refuse" (OOS).
+    # TP = OOS AND refused; FN = OOS AND not refused;
+    # FP = in-scope AND refused; TN = in-scope AND not refused.
+    tp = sum(1 for r in oos_results if r.get("refused"))
+    fn = sum(1 for r in oos_results if r.get("refused") is False)
+    fp = sum(1 for r in in_scope_results if r.get("refused"))
+    tn = sum(1 for r in in_scope_results if r.get("refused") is False)
+    refusal_n = tp + fn + fp + tn
+
+    def _safediv(a: int, b: int) -> float | None:
+        return (a / b) if b > 0 else None
+
+    precision = _safediv(tp, tp + fp)
+    recall = _safediv(tp, tp + fn)
+    if precision is not None and recall is not None and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = None
+
+    # tau_low sweep: floor-only refusals, computed analytically from logged
+    # top-1 scores across both in-scope and OOS records. The sweep is dense-only
+    # because BM25/RRF top-1 scores aren't on the same scale; for non-dense
+    # configs the sweep table simply collapses to "floor never triggers".
+    sweep: list[dict] = []
+    in_scope_top1 = [
+        (r["retrieved_scores"][0] if r.get("retrieved_scores") else 0.0)
+        for r in in_scope_results
+    ]
+    oos_top1 = [
+        (r["retrieved_scores"][0] if r.get("retrieved_scores") else 0.0)
+        for r in oos_results
+    ]
+    for tau in _TAU_LOW_SWEEP:
+        floor_tp = sum(1 for s in oos_top1 if s < tau)
+        floor_fn = len(oos_top1) - floor_tp
+        floor_fp = sum(1 for s in in_scope_top1 if s < tau)
+        sweep.append({
+            "tau_low": tau,
+            "floor_tp": floor_tp,
+            "floor_fn": floor_fn,
+            "floor_fp": floor_fp,
+            "floor_precision": _safediv(floor_tp, floor_tp + floor_fp),
+            "floor_recall": _safediv(floor_tp, floor_tp + floor_fn),
+        })
+
+    return {
+        "n_generated": len(in_scope_results) + len(oos_results),
+        "n_judged": n_judged,
+        "faithfulness_mean": (
+            sum(r["faithfulness"] for r in judged) / n_judged if n_judged else None
+        ),
+        "correctness_mean": (
+            sum(r["correctness"] for r in judged) / n_judged if n_judged else None
+        ),
+        "rouge_l_mean": (
+            sum(r["rouge_l"] for r in rouge_records) / n_rouge if n_rouge else None
+        ),
+        "refusal_precision": precision,
+        "refusal_recall": recall,
+        "refusal_f1": f1,
+        "refusal_tp": tp,
+        "refusal_fp": fp,
+        "refusal_fn": fn,
+        "refusal_tn": tn,
+        "refusal_n": refusal_n,
+        "tau_low_sweep": sweep,
+    }
+
+
 def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
     """Run the retrieval portion of the eval for a single config.
 
@@ -251,6 +463,40 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
     reranker = Reranker(reranker_model) if reranker_model else None
     if reranker is not None:
         print(f"[run] reranker: {reranker_model}", flush=True)
+
+    # `--full` mode: build the generator + judge once, before the case loop.
+    # Both eagerly check OPENAI_API_KEY in their constructors, so we fail fast
+    # if the env is misconfigured. Judge inherits model/base_url from the
+    # generation block when not separately specified — this is biased but
+    # cheap; see prompts/judge_v1.md and DEFERRED.md.
+    generator: Generator | None = None
+    judge: Judge | None = None
+    chunks_by_id: dict | None = None
+    method = config.get("retrieval", {}).get("method", "dense")
+    tau_low = float(config.get("retrieval", {}).get("tau_low", 0.30))
+    if full:
+        gen_cfg = config["generation"]
+        judge_cfg = config.get("judge") or {}
+        generator = Generator(
+            model=gen_cfg["model"],
+            prompt_path=config["prompt"]["path"],
+            max_tokens=int(gen_cfg.get("max_tokens", 600)),
+            temperature=float(gen_cfg.get("temperature", 0.0)),
+            base_url=gen_cfg.get("base_url"),
+        )
+        judge = Judge(
+            model=judge_cfg.get("model") or gen_cfg["model"],
+            prompt_path=judge_cfg.get("prompt_path", "prompts/judge_v1.md"),
+            max_tokens=int(judge_cfg.get("max_tokens", 200)),
+            temperature=float(judge_cfg.get("temperature", 0.0)),
+            base_url=judge_cfg.get("base_url") or gen_cfg.get("base_url"),
+        )
+        chunks_by_id = retriever._chunks_by_id
+        print(
+            f"[run] full mode: generator={generator.model} "
+            f"judge={judge.model} (base_url={generator.base_url or 'default'})",
+            flush=True,
+        )
 
     in_scope_records: list[dict] = []
     adversarial_records: list[dict] = []
@@ -285,7 +531,8 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
             raw_lines.append(row)
         else:
             # OOS: in retrieval-only mode we just record the top-1 score for
-            # later tau_low calibration (Phase 4b).
+            # later tau_low calibration (Phase 4b). When `full`, we also run
+            # generation so we can detect model-side refusals.
             ids, scores, t_s = _retrieve_one(
                 retriever, reranker, config, case.question, k=RETRIEVE_K
             )
@@ -302,21 +549,36 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
             oos_records.append(row)
             raw_lines.append(row)
 
+        # Generation + judge step (in-scope and OOS both run generation; only
+        # in-scope cases hit the judge). Side effect: enriches `row` in place.
+        if full and generator is not None and judge is not None and chunks_by_id is not None:
+            gen_fields = _generate_and_judge(
+                case=case,
+                ids=ids,
+                scores=scores,
+                chunks_by_id=chunks_by_id,
+                generator=generator,
+                judge=judge,
+                method=method,
+                tau_low=tau_low,
+            )
+            row.update(gen_fields)
+
         # Heartbeat for slow configs (reranker on CPU): print every Nth case.
         if (ci + 1) % log_every == 0 or (ci + 1) == len(cases):
+            extra = ""
+            if full and "faithfulness" in row:
+                extra = (
+                    f" gen={row.get('faithfulness', '?')}/"
+                    f"{row.get('correctness', '?')}"
+                )
+            elif full and case.is_in_scope is False and "refused" in row:
+                extra = f" refused={row['refused']}"
             print(
                 f"[run]   {name}: {ci + 1}/{len(cases)} cases "
-                f"(last {row['query_time_ms']:.0f}ms)",
+                f"(last {row['query_time_ms']:.0f}ms){extra}",
                 flush=True,
             )
-
-    if full:
-        # Generation + LLM-as-judge + refusal P/R: deferred to Phase 4b.
-        # TBD: requires OPENAI_API_KEY (or any OpenAI-compatible endpoint via
-        # OPENAI_BASE_URL). See DEFERRED.md.
-        raise NotImplementedError(
-            "Generation / judge / refusal scoring deferred to Phase 4b - see DEFERRED.md"
-        )
 
     out_dir = RESULTS_DIR / name
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -334,11 +596,27 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
     summary["was_built"] = was_built
     summary["n_oos"] = len(oos_records)
 
-    print(
-        f"[run] {name}: hit@5_any={summary['hit@5_any']:.3f} "
-        f"hit@5_all={summary['hit@5_all']:.3f} mrr={summary['mrr']:.3f}",
-        flush=True,
-    )
+    if full:
+        gen_summary = _summarise_full(in_scope_records, oos_records)
+        summary["generation"] = gen_summary
+        summary["prompt_path"] = config["prompt"]["path"]
+        summary["generator_model"] = (generator.model if generator else None)
+        summary["judge_model"] = (judge.model if judge else None)
+        print(
+            f"[run] {name}: hit@5_any={summary['hit@5_any']:.3f} "
+            f"hit@5_all={summary['hit@5_all']:.3f} mrr={summary['mrr']:.3f} "
+            f"faith={gen_summary['faithfulness_mean']:.2f} "
+            f"corr={gen_summary['correctness_mean']:.2f} "
+            f"rouge_l={gen_summary['rouge_l_mean']:.3f} "
+            f"refusal_F1={(gen_summary['refusal_f1'] or 0):.3f}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[run] {name}: hit@5_any={summary['hit@5_any']:.3f} "
+            f"hit@5_all={summary['hit@5_all']:.3f} mrr={summary['mrr']:.3f}",
+            flush=True,
+        )
     return summary
 
 
@@ -374,22 +652,31 @@ def _emit_results_md(summaries: list[dict]) -> str:
     """
     by_name = {s["config_name"]: s for s in summaries}
 
+    has_generation = any(s.get("generation") for s in summaries)
+
     lines: list[str] = []
-    lines.append("# Phase 4a results - retrieval matrix")
+    lines.append("# Experiment matrix results")
     lines.append("")
     lines.append("## 1. Overview")
     lines.append("")
     lines.append(
-        "This file reports the **retrieval-only** portion of the experiment "
-        "matrix from `docs/01_architecture.md`. Metrics measured here: "
-        "hit@1 / hit@3 / hit@5 (any-match), hit@5 (all-match for multi-FAQ "
-        "cases), MRR, plus build-time and per-query latency. The 64 in-scope "
-        "cases (golden_path + multi_faq + adversarial) drive the headline "
-        "numbers. The 8 OOS cases have their top-1 similarity captured for "
-        "later `tau_low` calibration."
+        "This file reports the experiment matrix from `docs/01_architecture.md`. "
+        "Retrieval metrics — hit@1 / hit@3 / hit@5 (any-match), hit@5 (all-match "
+        "for multi-FAQ cases), MRR, build-time, per-query latency — are populated "
+        "for every config in §3. Generation metrics — LLM-judge faithfulness + "
+        "correctness, ROUGE-L baseline, refusal precision/recall, `tau_low` "
+        "calibration — populate §8 only for configs run with `--full` "
+        "(generation requires `OPENAI_API_KEY`)."
     )
     lines.append("")
-    lines.append(_DEFERRED_NOTE)
+    if not has_generation:
+        lines.append(_DEFERRED_NOTE)
+    else:
+        lines.append(
+            "**Generation status:** at least one config has been run with "
+            "`--full`; per-config numbers appear in §8. Configs without "
+            "generation data are listed with TBD."
+        )
     lines.append("")
     lines.append(
         "Voyage AI was excluded from the embedding axis because "
@@ -494,38 +781,90 @@ def _emit_results_md(summaries: list[dict]) -> str:
     lines.append(_adversarial_commentary(by_name))
     lines.append("")
 
-    # 8. Generation placeholder
-    lines.append("## 8. Generation results (Phase 4b - TBD)")
+    # 8. Generation results — populated when --full has been run on at least
+    # one config. Configs without generation data show TBD rows so the reader
+    # can see what's still to come.
+    gen_configs = [s for s in summaries if s.get("generation")]
+    lines.append("## 8. Generation results")
     lines.append("")
-    lines.append(
-        "Once `OPENAI_API_KEY` is set (and optionally `OPENAI_BASE_URL` to "
-        "point at a non-OpenAI provider) we will run generation across the "
-        "top-2 / top-3 retrieval configs by hit@5_any, crossed with the "
-        "three prompt variants in `prompts/`."
-    )
-    lines.append("")
-    lines.append(
-        "| retrieval config | prompt | faithfulness | correctness | ROUGE-L | refusal P | refusal R |"
-    )
-    lines.append(
-        "|---|---|---:|---:|---:|---:|---:|"
-    )
-    # Reserve rows for top-3 retrieval configs by hit@5_any.
-    sorted_for_gen = sorted(
-        summaries, key=lambda s: s["hit@5_any"] or 0.0, reverse=True
-    )[:3]
-    for s in sorted_for_gen:
-        for prompt in ("system_v1", "system_v2", "system_v3"):
+    if gen_configs:
+        lines.append(
+            "Per-config generation metrics (populated by `--full`). "
+            "Faithfulness and correctness are 0–5 LLM-judge scores against the "
+            "expected answer themes; ROUGE-L is a string-overlap baseline "
+            "against the canonical FAQ chunk text(s). Refusal P/R is computed "
+            "over the 80-case set (positive class = OOS that the system "
+            "correctly refused). The judge defaults to the same model as the "
+            "generator unless `judge.model` is set in the YAML — note the "
+            "self-evaluation bias when both columns are filled by the same model."
+        )
+        lines.append("")
+        lines.append(
+            "| config | prompt | generator | judge | faithfulness | correctness | ROUGE-L | refusal P | refusal R | refusal F1 |"
+        )
+        lines.append(
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|"
+        )
+        for s in sorted(gen_configs, key=lambda x: x["config_name"]):
+            g = s["generation"]
+            prompt = Path(s.get("prompt_path", "prompts/system_v1.md")).stem
             lines.append(
-                f"| `{s['config_name']}` | `{prompt}` | TBD | TBD | TBD | TBD | TBD |"
+                "| `{cfg}` | `{prompt}` | `{gm}` | `{jm}` | {faith:.2f} | {corr:.2f} | {rouge:.3f} | {p} | {r} | {f1} |".format(
+                    cfg=s["config_name"],
+                    prompt=prompt,
+                    gm=s.get("generator_model", "?"),
+                    jm=s.get("judge_model", "?"),
+                    faith=g["faithfulness_mean"] or 0.0,
+                    corr=g["correctness_mean"] or 0.0,
+                    rouge=g["rouge_l_mean"] or 0.0,
+                    p=_format_pct(g["refusal_precision"]) if g["refusal_precision"] is not None else "-",
+                    r=_format_pct(g["refusal_recall"]) if g["refusal_recall"] is not None else "-",
+                    f1=_format_pct(g["refusal_f1"]) if g["refusal_f1"] is not None else "-",
+                )
             )
-    lines.append("")
-    lines.append(
-        "Refusal precision/recall additionally needs the 8 OOS cases plus "
-        "the `tau_low` sweep (`tau_low in {0.20, 0.25, ..., 0.50}`) per "
-        "embedding model - see DEFERRED.md."
-    )
-    lines.append("")
+        lines.append("")
+        # Refusal calibration sub-table from the tau_low sweep. Pull the first
+        # config's sweep — for non-dense retrieval configs, `tau_low` is dense-
+        # only and the sweep is informative only on the dense rows.
+        first_with_sweep = next(
+            (s for s in gen_configs if s["generation"].get("tau_low_sweep")),
+            None,
+        )
+        if first_with_sweep is not None:
+            lines.append(
+                f"### Refusal floor calibration — `{first_with_sweep['config_name']}`"
+            )
+            lines.append("")
+            lines.append(
+                "Floor-only refusal precision/recall at each `tau_low`, computed "
+                "from logged top-1 dense scores. The configured value lives in "
+                "the YAML; this sweep helps pick a calibrated knee."
+            )
+            lines.append("")
+            lines.append("| tau_low | floor TP | floor FP | floor FN | precision | recall |")
+            lines.append("|---:|---:|---:|---:|---:|---:|")
+            for row in first_with_sweep["generation"]["tau_low_sweep"]:
+                lines.append(
+                    "| {t:.2f} | {tp} | {fp} | {fn} | {p} | {r} |".format(
+                        t=row["tau_low"],
+                        tp=row["floor_tp"],
+                        fp=row["floor_fp"],
+                        fn=row["floor_fn"],
+                        p=_format_pct(row["floor_precision"]) if row["floor_precision"] is not None else "-",
+                        r=_format_pct(row["floor_recall"]) if row["floor_recall"] is not None else "-",
+                    )
+                )
+            lines.append("")
+    else:
+        lines.append(
+            "No `--full` runs yet. Once `OPENAI_API_KEY` is set, run "
+            "`python -m evals.run --config experiments/<name>.yaml --full` "
+            "to populate this section. The eval ships an OpenAI-compatible "
+            "generator (`generator.py`) and an LLM-as-judge "
+            "(`evals/judge.py`); both honour `OPENAI_BASE_URL` and the YAML's "
+            "`generation.base_url` so any provider works (see DEFERRED.md)."
+        )
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -565,19 +904,39 @@ def _axis_commentary(by_name: dict[str, dict]) -> str:
         return f"{s['build_time_s']:.1f}s"
 
     # 4.1 Chunking
+    base_h5 = base["hit@5_any"] if base and base.get("hit@5_any") is not None else None
+    a_h5 = chunk_a["hit@5_any"] if chunk_a and chunk_a.get("hit@5_any") is not None else None
+    if base_h5 is not None and a_h5 is not None:
+        delta_pp = (a_h5 - base_h5) * 100.0
+        if delta_pp >= 1.0:
+            verdict = (
+                "matches the architect's predicted small lift from the section "
+                "prior (3-6 high-signal tokens of disambiguation context)."
+            )
+        elif delta_pp > -1.0:
+            verdict = (
+                "is essentially flat — the predicted small lift from the "
+                "section prior didn't materialise on this corpus."
+            )
+        else:
+            verdict = (
+                f"**hurt** hit@5_any by {-delta_pp:.1f} pp, the **opposite** "
+                "of the architect's prediction. Plausible mechanism: section "
+                "name biases the embedding toward the section centroid rather "
+                "than the specific question, increasing intra-section confusion."
+            )
+    else:
+        verdict = ""
     lines.append(
         "**Chunking.** Baseline (`default`, per-question) sits at "
         f"hit@5_any = {num(base, 'hit@5_any')}. Section-prepended chunking "
-        f"(`chunking_section`) lands at {num(chunk_a, 'hit@5_any')}; the "
-        "section prior gives the embedding model 3-6 high-signal tokens of "
-        "disambiguation context (Climate vs. Disclosures vs. Alignment) at "
-        "near-zero cost. Splitting long entries on top "
-        f"(`chunking_section_split_long`) reaches {num(chunk_b, 'hit@5_any')}. "
-        "The corpus has only a handful of >800-token outliers, so most chunks "
-        "pass through the splitter untouched - movement here is dominated by "
-        "the long-entry tail (the FINREP block, the long 'what should "
-        "financial companies report' answer) being separated from short "
-        "queries that previously matched them by sheer length."
+        f"(`chunking_section`) lands at {num(chunk_a, 'hit@5_any')} — {verdict} "
+        "Splitting long entries on top (`chunking_section_split_long`) reaches "
+        f"{num(chunk_b, 'hit@5_any')}. The corpus has only a handful of "
+        ">800-token outliers, so most chunks pass through the splitter "
+        "untouched — splitting moves the needle only on the long-entry tail "
+        "(the FINREP block, the long 'what should financial companies report' "
+        "answer)."
     )
     lines.append("")
 
@@ -612,55 +971,82 @@ def _axis_commentary(by_name: dict[str, dict]) -> str:
     lines.append("")
 
     # 4.4 Reranker
+    rerank_h5 = rerank["hit@5_any"] if rerank and rerank.get("hit@5_any") is not None else None
+    base_h5 = base["hit@5_any"] if base and base.get("hit@5_any") is not None else None
+    if rerank_h5 is not None and base_h5 is not None:
+        lift_pp = (rerank_h5 - base_h5) * 100.0
+        promoted = "**promotes to default**" if lift_pp > 5.0 else "**stays a variant**"
+        lift_clause = (
+            f" Lift over the dense baseline = **{lift_pp:+.1f} pp**, "
+            f"vs the architecture's 5-pp promotion threshold (§5) — reranker "
+            f"{promoted}."
+        )
+    else:
+        lift_clause = ""
     lines.append(
         "**Reranker.** Cross-encoder reranking (bge-reranker-v2-m3) on top of "
         "the baseline dense pipeline moved hit@5_any from "
-        f"{num(base, 'hit@5_any')} to {num(rerank, 'hit@5_any')}. MRR shifted "
-        f"from {num(base, 'mrr')} to {num(rerank, 'mrr')} - the reranker "
-        "primarily reorders results that dense already surfaces (its lift on "
-        "hit@5 is bounded by recall@20 of the dense first stage), so MRR is "
-        "the more sensitive headline. Whether the lift clears the 5-pp "
-        "'promote to default' bar from architecture s5 is read off the table "
-        "above."
+        f"{num(base, 'hit@5_any')} to {num(rerank, 'hit@5_any')} and MRR from "
+        f"{num(base, 'mrr')} to {num(rerank, 'mrr')}. The reranker primarily "
+        "reorders results that dense already surfaces (its lift on hit@5 is "
+        "bounded by recall@20 of the dense first stage), so MRR is the more "
+        "sensitive headline." + lift_clause
     )
     return "\n".join(lines)
 
 
 def _best_of_summary(by_name: dict[str, dict]) -> str:
-    """Pick the best config by hit@5_any and report the gap to the next-best."""
-    sorted_summaries = sorted(
-        by_name.values(), key=lambda s: s["hit@5_any"] or 0.0, reverse=True
-    )
-    best = sorted_summaries[0]
-    next_best = sorted_summaries[1] if len(sorted_summaries) > 1 else None
+    """Top configs by hit@5_any with tie handling and MRR tiebreaker."""
+    summaries = [s for s in by_name.values() if s.get("hit@5_any") is not None]
+    if not summaries:
+        return "_No retrieval data yet._"
+    sorted_h5 = sorted(summaries, key=lambda s: s["hit@5_any"], reverse=True)
+    top_h5 = sorted_h5[0]["hit@5_any"]
+    h5_winners = [s for s in sorted_h5 if s["hit@5_any"] == top_h5]
     base = by_name.get("default")
     base_h5 = base["hit@5_any"] if base else None
-    diff_to_baseline = (
-        (best["hit@5_any"] - base_h5) if (base_h5 is not None) else None
-    )
+    diff_to_baseline = (top_h5 - base_h5) if base_h5 is not None else None
 
     parts: list[str] = []
-    parts.append(
-        f"On hit@5_any, **`{best['config_name']}`** wins at "
-        f"{best['hit@5_any']:.3f} (MRR {best['mrr']:.3f})."
-    )
-    if next_best is not None:
-        gap = best["hit@5_any"] - (next_best["hit@5_any"] or 0.0)
+    if len(h5_winners) == 1:
+        s = h5_winners[0]
         parts.append(
-            f"Next best is `{next_best['config_name']}` at "
-            f"{next_best['hit@5_any']:.3f} (gap = {gap:.3f} = "
-            f"{gap*100:.1f} pp)."
+            f"On hit@5_any, **`{s['config_name']}`** wins at "
+            f"{s['hit@5_any']:.3f} (MRR {s['mrr']:.3f})."
         )
+        if len(sorted_h5) > 1:
+            nb = sorted_h5[1]
+            gap_pp = (top_h5 - nb["hit@5_any"]) * 100.0
+            parts.append(
+                f"Next best: `{nb['config_name']}` at {nb['hit@5_any']:.3f} "
+                f"(gap = {gap_pp:.1f} pp)."
+            )
+    else:
+        names = ", ".join(f"`{w['config_name']}`" for w in h5_winners)
+        mrr_best = max(h5_winners, key=lambda x: x.get("mrr") or 0.0)
+        parts.append(
+            f"**{len(h5_winners)}-way tie at hit@5_any = {top_h5:.3f}**: {names}. "
+            f"MRR breaks the tie: `{mrr_best['config_name']}` at "
+            f"{mrr_best['mrr']:.3f}."
+        )
+
+    # Best MRR overall — separate concern when the MRR winner isn't in the
+    # hit@5 winning set (different "best" configs depending on metric).
+    sorted_mrr = sorted(summaries, key=lambda s: s.get("mrr") or 0.0, reverse=True)
+    if sorted_mrr:
+        mrr_winner = sorted_mrr[0]
+        winner_names = {w["config_name"] for w in h5_winners}
+        if mrr_winner["config_name"] not in winner_names:
+            parts.append(
+                f"Best MRR: **`{mrr_winner['config_name']}`** at "
+                f"{mrr_winner['mrr']:.3f} (hit@5_any={mrr_winner['hit@5_any']:.3f}) — "
+                "different metric, different winner."
+            )
+
     if diff_to_baseline is not None:
         parts.append(
-            f"Lift over `default`: {diff_to_baseline:.3f} = "
-            f"{diff_to_baseline*100:.1f} pp."
+            f"Lift over `default`: {diff_to_baseline*100:.1f} pp on hit@5_any."
         )
-    parts.append(
-        "The combo blends the strongest axis settings observed in the "
-        "isolated sweeps; reviewers can confirm by reading down column "
-        "`hit@5 (any)` in the table above."
-    )
     return " ".join(parts)
 
 
@@ -726,35 +1112,45 @@ def _fine_tune_verdict(by_name: dict[str, dict]) -> str:
 
 
 def _adversarial_commentary(by_name: dict[str, dict]) -> str:
-    """Look for configs that win overall but lose adversarial."""
-    summaries = [s for s in by_name.values() if s["adversarial_hit@5_any"] is not None]
+    """Top + bottom on the adversarial subset, with tie handling.
+
+    Reports who ties for first, who trails, and the gap. Avoids speculative
+    prose about *why* a config wins/loses — the data is what it is, and
+    causal claims belong in the architecture doc, not auto-generated text.
+    """
+    summaries = [s for s in by_name.values() if s.get("adversarial_hit@5_any") is not None]
     if not summaries:
         return ""
-    by_overall = sorted(summaries, key=lambda s: s["hit@5_any"] or 0.0, reverse=True)
-    by_adv = sorted(summaries, key=lambda s: s["adversarial_hit@5_any"] or 0.0, reverse=True)
-    overall_winner = by_overall[0]
-    adv_winner = by_adv[0]
-    parts = []
-    if overall_winner["config_name"] != adv_winner["config_name"]:
+    by_adv = sorted(summaries, key=lambda s: s["adversarial_hit@5_any"], reverse=True)
+    top_score = by_adv[0]["adversarial_hit@5_any"]
+    bot_score = by_adv[-1]["adversarial_hit@5_any"]
+    top_names = sorted(s["config_name"] for s in by_adv if s["adversarial_hit@5_any"] == top_score)
+    bot_names = sorted(s["config_name"] for s in by_adv if s["adversarial_hit@5_any"] == bot_score)
+
+    parts: list[str] = []
+    if len(top_names) == 1:
         parts.append(
-            f"Overall winner (`{overall_winner['config_name']}`, hit@5_any="
-            f"{overall_winner['hit@5_any']:.3f}) is NOT the adversarial "
-            f"winner (`{adv_winner['config_name']}`, adversarial hit@5_any="
-            f"{adv_winner['adversarial_hit@5_any']:.3f}). The disambiguation "
-            "tests reward different design choices than the average golden-path "
-            "case - typically section-prepended chunking and the cross-encoder "
-            "reranker, both of which add discriminating signal between "
-            "near-duplicate FAQs."
+            f"`{top_names[0]}` leads adversarial at hit@5_any = {top_score:.3f}."
         )
     else:
+        names = ", ".join(f"`{n}`" for n in top_names)
         parts.append(
-            f"`{overall_winner['config_name']}` wins both overall "
-            f"(hit@5_any={overall_winner['hit@5_any']:.3f}) and on the "
-            f"adversarial subset (hit@5_any="
-            f"{overall_winner['adversarial_hit@5_any']:.3f}). The disambiguation "
-            "headroom from the section prior + reranker carries through to the "
-            "average case."
+            f"{len(top_names)} configs tie at adversarial hit@5_any = "
+            f"{top_score:.3f}: {names}."
         )
+
+    if bot_score < top_score:
+        bot_label = ", ".join(f"`{n}`" for n in bot_names)
+        gap_pp = (top_score - bot_score) * 100.0
+        parts.append(
+            f"At the bottom: {bot_label} at {bot_score:.3f} "
+            f"({gap_pp:.1f} pp behind the leader)."
+        )
+
+    parts.append(
+        "With only 8 adversarial cases the per-config differences are 1-2 "
+        "cases each; the adversarial bucket is suggestive, not definitive."
+    )
     return " ".join(parts)
 
 
@@ -778,7 +1174,8 @@ def main(argv: list[str] | None = None) -> int:
                       help="Phase 4a: retrieval metrics only (default).")
     mode.add_argument("--full", action="store_true",
                       help="Phase 4b: also run generation + judge + refusal. "
-                           "Requires OPENAI_API_KEY (NotImplementedError today).")
+                           "Requires OPENAI_API_KEY; uses OPENAI_BASE_URL "
+                           "or YAML generation.base_url for non-OpenAI providers.")
     parser.add_argument("--cases", default=str(DEFAULT_CASES),
                         help="Path to cases.jsonl (default: evals/cases.jsonl).")
     args = parser.parse_args(argv)

@@ -1,72 +1,91 @@
 # Deferred work — to be done once `OPENAI_API_KEY` is set
 
-Phase 4a (the retrieval portion of the matrix) is complete and documented in
-[`evals/RESULTS.md`](evals/RESULTS.md). The remaining work is **API-gated**:
+Phase 4a (retrieval matrix) is complete and documented in
+[`evals/RESULTS.md`](evals/RESULTS.md). **Phase 4b is now implemented** —
 generation, LLM-as-judge faithfulness/correctness, ROUGE-L baseline, refusal
-precision/recall, and `tau_low` calibration all need a chat-completions
-endpoint.
+precision/recall, and `tau_low` calibration all run when `--full` is passed
+to the eval runner. The remaining work is **execution** (and reading the
+results), not coding.
 
-The backend is **OpenAI-compatible** (see `generator.py`). That means the same
-code talks to OpenAI proper, Azure OpenAI, OpenRouter, Together, Groq, LM
-Studio, Ollama, vLLM, etc. — pick whichever you have credit / hardware for and
-set `OPENAI_BASE_URL` accordingly.
+The backend is **OpenAI-compatible** (see `generator.py`) and so is the
+judge (`evals/judge.py`). Same code talks to OpenAI, Azure, OpenRouter,
+Together, Groq, LM Studio, Ollama, vLLM, etc. — pick whichever you have
+credit / hardware for and set `OPENAI_BASE_URL` (or `generation.base_url`
+in the YAML) accordingly.
 
 ## Prerequisites
 
 ```bash
 export OPENAI_API_KEY=sk-...
 # Optional: any OpenAI-compatible endpoint. Default = OpenAI proper.
-# export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-# export OPENAI_BASE_URL=http://localhost:1234/v1   # LM Studio
-# export OPENAI_BASE_URL=http://localhost:11434/v1  # Ollama
-# Optional: only if comparing Voyage embeddings:
-# export VOYAGE_API_KEY=pa-...
+# export OPENAI_BASE_URL=https://api.groq.com/openai/v1     # Groq
+# export OPENAI_BASE_URL=https://openrouter.ai/api/v1        # OpenRouter
+# export OPENAI_BASE_URL=http://localhost:1234/v1            # LM Studio
+# export OPENAI_BASE_URL=http://localhost:11434/v1           # Ollama
 ```
 
-Verify reachability:
-
-```bash
-.venv/bin/python -c "import os; assert os.environ.get('OPENAI_API_KEY'), 'missing OPENAI_API_KEY'"
-```
+`experiments/groq.yaml` is a worked example pre-pinning Groq's URL +
+`llama-3.3-70b-versatile`. For other providers, copy and tweak the two
+fields under `generation:`.
 
 ## Phase 4b — generation + judge + refusal
 
-Goal: complete the experimentation matrix.  Retrieval (hit@k, MRR) is done;
-generation is not.
+Goal: populate §8 of `evals/RESULTS.md`.
 
-1. **Pick the top-3 retrieval configs** for the generation sweep. Read
-   `evals/RESULTS.md` §3 — current top-3 by hit@5_any are `max`, `rerank`,
-   `embed_bge_large` (and `default`/`retrieval_hybrid` tie behind). Cross with
-   the 3 prompt variants (`prompts/system_v{1,2,3}.md`) → 9 generation cells.
-2. **Run generation** on the 64 in-scope cases per cell: ~580 chat-completion
-   calls. Cost depends on the chosen model — `gpt-4o-mini` (default) is
-   roughly **$0.30** for the full sweep including LLM-judge (input ~3k
-   tokens × 580 calls × $0.15/1M + output ~250 × 580 × $0.60/1M ≈ pennies).
-   Pricier models (gpt-4o, claude-via-openrouter, llama-3.3-70b) scale
-   accordingly.
-3. **LLM-as-judge** for faithfulness + correctness — by default reuse the
-   same model as the generator; for higher fidelity use a stronger judge
-   (e.g. `gpt-4o`). One judge call per generated answer.
-4. **ROUGE-L baseline** vs the canonical FAQ answer text — purely local, no
-   API call.
-5. **Refusal precision/recall** on the 8 OOS cases plus a `tau_low` sweep
-   ({0.20, 0.25, ..., 0.50}) per embedding model — architecture §8 calibration.
-6. **Update `evals/RESULTS.md`** §8 (generation) with the populated table
-   plus one paragraph of commentary per metric.
+```bash
+# One config end-to-end (~3 min on Groq's free tier for 80 cases × 2 calls
+# each = ~160 calls):
+python -m evals.run --config experiments/groq.yaml --full
 
-The runner currently raises `NotImplementedError` for the `--full` branch;
-implement the generation + judge code paths there. The retrieval-half results
-already in `evals/results/{config}/raw.jsonl` should be reused (no need to
-re-retrieve). Reuse `generator.Generator` for both roles (generator and judge);
-just instantiate two with different `model` / `prompt_path` settings.
+# All 9 configs end-to-end (~25 min):
+python -m evals.run --all --full
+```
+
+What `--full` does per case:
+1. **Retrieval** as in Phase 4a (already cached for these configs).
+2. **Generation** — calls the configured `generation.model` through the
+   `Generator` class.
+3. **Refusal-floor short-circuit** — if dense top-1 < `tau_low`, skip
+   generation and emit the canonical refusal.
+4. **LLM-as-judge** (in-scope cases only) — separate call to score
+   faithfulness + correctness on a 0-5 scale against `expected_answer_themes`.
+5. **ROUGE-L** — local computation against the canonical FAQ chunk text(s).
+6. **Refusal flags** — both floor-driven and model-driven; aggregated into
+   precision/recall/F1 over all 80 cases.
+7. **`tau_low` sweep** — analytical from logged top-1 scores, sweeps
+   {0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50}.
+
+### Cost estimate (gpt-4o-mini default)
+
+- Generation: 80 cases × ~3k tokens = 240k input + ~25k output tokens.
+- Judge: 64 in-scope cases × ~3.5k tokens = 224k input + ~10k output tokens.
+- Per config: ~$0.07 input + ~$0.02 output ≈ **$0.09**.
+- 9 configs end-to-end: **<$1**.
+
+### Cost on Groq (free tier)
+
+Groq's free tier with `llama-3.3-70b-versatile` is rate-limited (≈30 RPM)
+but free; the eval pace is bounded by the rate limit, not cost. Expect
+~3 min per config of wall clock.
+
+### Judge bias caveat
+
+By default the judge uses the same model as the generator (no `judge.model`
+override needed in the YAML). This is biased — a model is rarely a strict
+critic of its own output. To run an unbiased pass, add to the YAML:
+
+```yaml
+judge:
+  model: gpt-4o                # or any stronger model your provider exposes
+  base_url: https://api.openai.com/v1   # or omit if same as generation
+```
 
 ## Phase 4b (optional) — Voyage embedding variant
 
 If `VOYAGE_API_KEY` is set, drop a YAML in `experiments/` modelled on
 `bge_large_hybrid_rerank.yaml` but with `embedding.backend: voyage_3_large`.
-Build the index (`python -m ingest --config experiments/voyage_3_large.yaml`)
-and re-run the embedding axis with Voyage as a third data point. Document in
-`RESULTS.md §4` whether the API model meaningfully beats local bge-large.
+Build the index, then re-run the embedding axis with Voyage as a third
+data point.
 
 If skipped: note in `RESULTS.md §1` that the embedding axis was reported on
 local models only.
@@ -74,7 +93,8 @@ local models only.
 ## Phase 7b — final wrap-up
 
 Once Phase 4b lands, refresh `README.md` so the design narrative cites the
-full numbers (not just retrieval). Also re-run a fresh-clone sanity check:
+generation numbers (not just retrieval). Re-run the fresh-clone sanity
+check:
 
 ```bash
 git clean -fdx index/ evals/results/
