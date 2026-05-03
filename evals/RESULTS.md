@@ -15,6 +15,8 @@ Voyage AI was excluded from the embedding axis because `VOYAGE_API_KEY` is not s
 | `chunking_section` | per_question_with_section | bge_small | dense | none |
 | `chunking_section_split_long` | per_question_with_section_split_long | bge_small | dense | none |
 | `default` | per_question | bge_small | dense | none |
+| `default_v2` | per_question | bge_small | dense | none |
+| `default_v3` | per_question | bge_small | dense | none |
 | `embed_bge_large` | per_question | bge_large | dense | none |
 | `max` | per_question_with_section_split_long | bge_large | hybrid | BAAI/bge-reranker-v2-m3 |
 | `rerank` | per_question | bge_small | dense | BAAI/bge-reranker-v2-m3 |
@@ -28,11 +30,13 @@ Voyage AI was excluded from the embedding axis because `VOYAGE_API_KEY` is not s
 | `chunking_section` | 0.792 | 0.917 | 0.917 | 0.889 | 0.856 | 72 | 30.9 | 19.1 |
 | `chunking_section_split_long` | 0.792 | 0.917 | 0.917 | 0.889 | 0.856 | 72 | 31.6 | 18.3 |
 | `default` | 0.833 | 0.931 | 0.958 | 0.917 | 0.883 | 72 | 0.0 | 23.9 |
-| `embed_bge_large` | 0.875 | 0.958 | 0.958 | 0.944 | 0.916 | 72 | 259.2 | 165.6 |
-| `max` | 0.833 | 0.972 | 0.972 | 0.944 | 0.896 | 72 | 0.0 | 102823.3 |
-| `rerank` | 0.833 | 0.944 | 0.972 | 0.931 | 0.894 | 72 | 0.0 | 118613.6 |
+| `default_v2` | 0.833 | 0.931 | 0.958 | 0.917 | 0.883 | 72 | 25.7 | 23.0 |
+| `default_v3` | 0.833 | 0.931 | 0.958 | 0.917 | 0.883 | 72 | 25.7 | 20.3 |
+| `embed_bge_large` | 0.875 | 0.958 | 0.958 | 0.944 | 0.916 | 72 | 0.0 | 223.6 |
+| `max` | 0.833 | 0.972 | 0.972 | 0.944 | 0.896 | 72 | 0.0 | 102639.2 |
+| `rerank` | 0.833 | 0.944 | 0.972 | 0.931 | 0.894 | 72 | 0.0 | 118912.1 |
 | `retrieval_bm25` | 0.778 | 0.861 | 0.917 | 0.819 | 0.837 | 72 | 30.9 | 1.2 |
-| `retrieval_hybrid` | 0.847 | 0.917 | 0.958 | 0.903 | 0.893 | 72 | 30.2 | 18.9 |
+| `retrieval_hybrid` | 0.847 | 0.917 | 0.958 | 0.903 | 0.893 | 72 | 0.0 | 24.1 |
 
 Notes: `hit@5 (any)` requires at least one expected chunk in the top-5 - this is the headline metric. `hit@5 (all)` requires every expected chunk in the top-5 and is dominated by the 16 multi-FAQ cases (single-target cases are equivalent to `hit@5 (any)`). `build_s` is wall-clock for an actual index build at this run; 0.0 means the index was cached from a prior run.
 
@@ -40,7 +44,7 @@ Notes: `hit@5 (any)` requires at least one expected chunk in the top-5 - this is
 
 **Chunking.** Baseline (`default`, per-question) sits at hit@5_any = 0.958. Section-prepended chunking (`chunking_section`) lands at 0.917 — **hurt** hit@5_any by 4.2 pp, the **opposite** of the architect's prediction. Plausible mechanism: section name biases the embedding toward the section centroid rather than the specific question, increasing intra-section confusion. Splitting long entries on top (`chunking_section_split_long`) reaches 0.917. The corpus has only a handful of >800-token outliers, so most chunks pass through the splitter untouched — splitting moves the needle only on the long-entry tail (the FINREP block, the long 'what should financial companies report' answer).
 
-**Embedding model.** Holding chunking, retrieval, and reranker fixed to baseline, swapping bge-small for bge-large moved hit@5_any from 0.958 to 0.958 and MRR from 0.883 to 0.916. Build time changed from 0.0s to 259.2s (one-off; cached afterward). Per-query latency stays in the same ballpark - the index lookup is still a single dot product, just over a wider matrix (1024 dims vs. 384). Voyage was not run (no API key), so this is a within-family comparison; reviewers wanting a hosted-SOTA reference can drop a Voyage YAML in `experiments/` once the key is available.
+**Embedding model.** Holding chunking, retrieval, and reranker fixed to baseline, swapping bge-small for bge-large moved hit@5_any from 0.958 to 0.958 and MRR from 0.883 to 0.916. Build time changed from 0.0s to 0.0s (one-off; cached afterward). Per-query latency stays in the same ballpark - the index lookup is still a single dot product, just over a wider matrix (1024 dims vs. 384). Voyage was not run (no API key), so this is a within-family comparison; reviewers wanting a hosted-SOTA reference can drop a Voyage YAML in `experiments/` once the key is available.
 
 **Retrieval method.** With per-question chunking + bge-small + no rerank, dense retrieval (`default`) gives hit@5_any = 0.958, BM25-only (`retrieval_bm25`) gives 0.917, and hybrid RRF (`retrieval_hybrid`) gives 0.958. The FAQ corpus has heavy term repetition ('Article 8', 'TSC', 'CapEx', section codes), so BM25 is genuinely a tough baseline - article references are exact-match signals dense models routinely fumble. Hybrid RRF needs no tunable weight and reliably matches or beats either component when neither one dominates.
 
@@ -63,13 +67,15 @@ Hit@5 (any) restricted to the 8 adversarial cases. These are the near-duplicate 
 | `chunking_section` | 0.625 | 0.917 | -0.292 |
 | `chunking_section_split_long` | 0.625 | 0.917 | -0.292 |
 | `default` | 0.750 | 0.958 | -0.208 |
+| `default_v2` | 0.750 | 0.958 | -0.208 |
+| `default_v3` | 0.750 | 0.958 | -0.208 |
 | `embed_bge_large` | 0.750 | 0.958 | -0.208 |
 | `max` | 0.750 | 0.972 | -0.222 |
 | `rerank` | 0.750 | 0.972 | -0.222 |
 | `retrieval_bm25` | 0.750 | 0.917 | -0.167 |
 | `retrieval_hybrid` | 0.750 | 0.958 | -0.208 |
 
-6 configs tie at adversarial hit@5_any = 0.750: `default`, `embed_bge_large`, `max`, `rerank`, `retrieval_bm25`, `retrieval_hybrid`. At the bottom: `chunking_section`, `chunking_section_split_long` at 0.625 (12.5 pp behind the leader). With only 8 adversarial cases the per-config differences are 1-2 cases each; the adversarial bucket is suggestive, not definitive.
+8 configs tie at adversarial hit@5_any = 0.750: `default`, `default_v2`, `default_v3`, `embed_bge_large`, `max`, `rerank`, `retrieval_bm25`, `retrieval_hybrid`. At the bottom: `chunking_section`, `chunking_section_split_long` at 0.625 (12.5 pp behind the leader). With only 8 adversarial cases the per-config differences are 1-2 cases each; the adversarial bucket is suggestive, not definitive.
 
 ## 8. Generation results
 
@@ -78,6 +84,12 @@ Per-config generation metrics (populated by `--full`). Faithfulness and correctn
 | config | prompt | generator | judge | faithfulness | correctness | ROUGE-L | refusal P | refusal R | refusal F1 |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|
 | `default` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.77 | 4.63 | 0.308 | 0.727 | 1.000 | 0.842 |
+| `default_v2` | `system_v2` | `gpt-4o-mini` | `gpt-4o-mini` | 4.78 | 4.59 | 0.298 | 0.727 | 1.000 | 0.842 |
+| `default_v3` | `system_v3` | `gpt-4o-mini` | `gpt-4o-mini` | 4.65 | 4.49 | 0.316 | 0.615 | 1.000 | 0.762 |
+| `embed_bge_large` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.65 | 4.51 | 0.293 | 0.615 | 1.000 | 0.762 |
+| `max` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.79 | 4.68 | 0.306 | 0.727 | 1.000 | 0.842 |
+| `rerank` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.72 | 4.61 | 0.306 | 0.667 | 1.000 | 0.800 |
+| `retrieval_hybrid` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.78 | 4.61 | 0.313 | 0.727 | 1.000 | 0.842 |
 
 ### Refusal floor calibration — `default`
 

@@ -1,17 +1,16 @@
-# Deferred work — to be done once `OPENAI_API_KEY` is set
+# Deferred work — what remains for follow-up runs
 
-Phase 4a (retrieval matrix) is complete and documented in
-[`evals/RESULTS.md`](evals/RESULTS.md). **Phase 4b is now implemented** —
-generation, LLM-as-judge faithfulness/correctness, ROUGE-L baseline, refusal
-precision/recall, and `tau_low` calibration all run when `--full` is passed
-to the eval runner. The remaining work is **execution** (and reading the
-results), not coding.
+**Phase 4a and Phase 4b are both complete.** [`evals/RESULTS.md`](evals/RESULTS.md)
+contains the full retrieval matrix (10 configs) and the populated generation
+table (7 configs run with `--full` through `gpt-4o-mini` on OpenAI proper,
+gpt-4o-mini also as the LLM-as-judge). What's documented here is **rerunnable
+follow-up work** — both for re-running Phase 4b on a different provider /
+model, and for the optional Voyage embedding variant.
 
-The backend is **OpenAI-compatible** (see `generator.py`) and so is the
-judge (`evals/judge.py`). Same code talks to OpenAI, Azure, OpenRouter,
-Together, Groq, LM Studio, Ollama, vLLM, etc. — pick whichever you have
-credit / hardware for and set `OPENAI_BASE_URL` (or `generation.base_url`
-in the YAML) accordingly.
+The backend is **OpenAI-compatible** (see `generator.py` and `evals/judge.py`).
+Same code talks to OpenAI, Azure, OpenRouter, Together, Groq, LM Studio,
+Ollama, vLLM, etc. — pick whichever you have credit / hardware for and set
+`OPENAI_BASE_URL` (or `generation.base_url` in the YAML) accordingly.
 
 ## Prerequisites
 
@@ -25,54 +24,54 @@ export OPENAI_API_KEY=sk-...
 ```
 
 `experiments/groq.yaml` is a worked example pre-pinning Groq's URL +
-`llama-3.3-70b-versatile`. For other providers, copy and tweak the two
-fields under `generation:`.
+`llama-3.3-70b-versatile`. For other providers, copy and tweak the two fields
+under `generation:`.
 
-## Phase 4b — generation + judge + refusal
-
-Goal: populate §8 of `evals/RESULTS.md`.
+## Re-running Phase 4b on a different provider/model
 
 ```bash
-# One config end-to-end (~3 min on Groq's free tier for 80 cases × 2 calls
-# each = ~160 calls):
-python -m evals.run --config experiments/groq.yaml --full
+# One config end-to-end (~6 min for 80 cases × 2 calls on OpenAI gpt-4o-mini):
+python -m evals.run --config experiments/default.yaml --full
 
-# All 9 configs end-to-end (~25 min):
+# All configs end-to-end:
 python -m evals.run --all --full
 ```
 
 What `--full` does per case:
-1. **Retrieval** as in Phase 4a (already cached for these configs).
+1. **Retrieval** as in Phase 4a (already cached for the existing configs).
 2. **Generation** — calls the configured `generation.model` through the
    `Generator` class.
 3. **Refusal-floor short-circuit** — if dense top-1 < `tau_low`, skip
    generation and emit the canonical refusal.
 4. **LLM-as-judge** (in-scope cases only) — separate call to score
-   faithfulness + correctness on a 0-5 scale against `expected_answer_themes`.
+   faithfulness + correctness on a 0–5 scale against `expected_answer_themes`.
 5. **ROUGE-L** — local computation against the canonical FAQ chunk text(s).
 6. **Refusal flags** — both floor-driven and model-driven; aggregated into
    precision/recall/F1 over all 80 cases.
 7. **`tau_low` sweep** — analytical from logged top-1 scores, sweeps
    {0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50}.
 
-### Cost estimate (gpt-4o-mini default)
+## Cost reality on free / paid tiers
 
-- Generation: 80 cases × ~3k tokens = 240k input + ~25k output tokens.
-- Judge: 64 in-scope cases × ~3.5k tokens = 224k input + ~10k output tokens.
-- Per config: ~$0.07 input + ~$0.02 output ≈ **$0.09**.
-- 9 configs end-to-end: **<$1**.
+What the actual matrix run consumed (7 configs, 80 cases each):
+- **OpenAI `gpt-4o-mini`** (the configs in `experiments/`): ≈ $0.10 / config →
+  **< $1 total** for the matrix. ~6 min wall clock per fast config (no
+  reranker), ~50 min per `rerank` config (CPU cross-encoder), ~2.5 hours
+  per `max` config (CPU cross-encoder + bge-large + section_split).
+- **Groq `llama-3.3-70b-versatile` free tier**: hit the **100 k TPD daily
+  cap** in one config run (the eval needs ~450 k tokens). Free Groq is not
+  practical for the full matrix without paying for the Dev tier or
+  switching to a smaller model with separate quota
+  (`llama-3.1-8b-instant`).
 
-### Cost on Groq (free tier)
-
-Groq's free tier with `llama-3.3-70b-versatile` is rate-limited (≈30 RPM)
-but free; the eval pace is bounded by the rate limit, not cost. Expect
-~3 min per config of wall clock.
-
-### Judge bias caveat
+## Judge bias caveat (most consequential follow-up)
 
 By default the judge uses the same model as the generator (no `judge.model`
-override needed in the YAML). This is biased — a model is rarely a strict
-critic of its own output. To run an unbiased pass, add to the YAML:
+override needed in the YAML). This is the biggest known limitation of the
+shipped numbers — a model is rarely a strict critic of its own output. The
+faith/corr deltas between top configs (max vs default ≈ 0.02–0.05) are
+within self-evaluation noise. To re-run with a stronger / different judge,
+add to the YAML:
 
 ```yaml
 judge:
@@ -80,21 +79,19 @@ judge:
   base_url: https://api.openai.com/v1   # or omit if same as generation
 ```
 
-## Phase 4b (optional) — Voyage embedding variant
+## Voyage embedding variant (optional)
 
 If `VOYAGE_API_KEY` is set, drop a YAML in `experiments/` modelled on
 `bge_large_hybrid_rerank.yaml` but with `embedding.backend: voyage_3_large`.
 Build the index, then re-run the embedding axis with Voyage as a third
 data point.
 
-If skipped: note in `RESULTS.md §1` that the embedding axis was reported on
-local models only.
+The current matrix shows bge-large already underperforms bge-small on
+generation faith/corr despite better hit@1 (broader retrieval = more
+ambiguous context). Voyage is unlikely to break this pattern but it's the
+only outstanding embedding axis variant.
 
-## Phase 7b — final wrap-up
-
-Once Phase 4b lands, refresh `README.md` so the design narrative cites the
-generation numbers (not just retrieval). Re-run the fresh-clone sanity
-check:
+## Fresh-clone sanity check
 
 ```bash
 git clean -fdx index/ evals/results/

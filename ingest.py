@@ -49,9 +49,6 @@ class Chunk:
 
 # --- Markdown parsing ------------------------------------------------------
 
-_SECTION_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$", re.MULTILINE)
-_QUESTION_RE = re.compile(r"^###\s+(?P<title>.+?)\s*$", re.MULTILINE)
-
 
 def _parse_faq_markdown(md_path: Path) -> list[tuple[str, str, str]]:
     """Parse the FAQ markdown into `(section, question, body)` triples.

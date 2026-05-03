@@ -4,10 +4,13 @@ A single-shot retrieval-augmented Q&A bot over the EU Taxonomy Navigator FAQs
 (329 entries across 7 sections). Built for the Sopra Steria NLP take-home.
 
 The 72-hour deadline in the brief was deliberately dropped in favour of a
-thorough experimentation matrix and a defensible eval (≈80 cases × 8 retrieval
-configs). See [`docs/01_architecture.md`](docs/01_architecture.md) for the
-design rationale and [`evals/RESULTS.md`](evals/RESULTS.md) for measured
-results.
+thorough experimentation matrix and a defensible eval: 80 hand-curated cases ×
+**10 retrieval configs** with full retrieval metrics, **7 of which were also
+run with `--full`** (generation through `gpt-4o-mini` plus LLM-as-judge
+faithfulness + correctness + ROUGE-L + refusal P/R + `tau_low` calibration).
+See [`docs/01_architecture.md`](docs/01_architecture.md) for the design
+rationale and [`evals/RESULTS.md`](evals/RESULTS.md) for measured results
+(retrieval table + generation table + tau_low floor calibration sweep).
 
 ## How to read this repo (recommended order)
 
@@ -142,25 +145,57 @@ and described in [`DEFERRED.md`](DEFERRED.md).
 
 ## Results in 30 seconds
 
-(See [`evals/RESULTS.md`](evals/RESULTS.md) for the full matrix.)
+(See [`evals/RESULTS.md`](evals/RESULTS.md) for the full matrix; this is the
+distilled story.)
 
-- **Best hit@5 = 0.972** (a 2-way tie between `rerank` and `max`). The
-  reranker delivers +1.4 pp over the best non-reranker config — *below* the
-  architecture's 5 pp promotion threshold, so the reranker stays a variant,
-  not the default.
+### Retrieval
+
+- **Best hit@5 = 0.972** (2-way tie between `rerank` and `max`). The reranker
+  delivers +1.4 pp over the best non-reranker config — *below* the architecture's
+  5 pp promotion threshold, so the reranker stays a variant, not the default.
 - **Best MRR = 0.916** (`embed_bge_large`). bge-large is 9× slower per query
-  than bge-small but lifts hit@1 from 0.833 to 0.875 and MRR by 3.3 pp.
-  Different headline → different winner.
+  than bge-small but lifts hit@1 from 0.833 to 0.875. Different headline →
+  different winner.
 - **Counter-prediction**: section-prepended chunking *hurt* hit@5 by 4.1 pp
   and adversarial by 12.5 pp. The architect's prediction of a small lift
-  flipped sign on this corpus. Plausible mechanism: section name biases
-  the embedding toward the section centroid rather than the specific
-  question.
-- **Stacking is sub-additive**: `max` (everything stacked) ties `rerank`
-  exactly on hit@5_any. The reranker absorbs all available headroom; the
-  other axes contribute nothing on top.
+  flipped sign on this corpus.
+- **Stacking is sub-additive on hit@5**: `max` ties `rerank` exactly. The
+  reranker absorbs all available retrieval headroom.
 - **Fine-tune trigger does not fire** (hit@5 = 0.972 ≫ 0.85). Phase 5 is
   intentionally skipped per architecture §10.
+
+### Generation (gpt-4o-mini through OpenAI proper, gpt-4o-mini also as LLM-judge)
+
+- **Generation quality is essentially flat across configs**: faithfulness
+  4.65–4.79 / 5, correctness 4.49–4.68. The retrieval matrix's hit@5 winners
+  (`max`, `rerank`) edge out by 0.02–0.05 — within LLM-judge noise. The
+  corpus is small and clean enough that any reasonable retrieval feeds
+  gpt-4o-mini well.
+- **`retrieval_hybrid` is the practical winner**: matches `max` (the absolute
+  empirical winner) on faith/corr within noise, but runs **~5000× faster** per
+  query (no CPU cross-encoder). For production, hybrid RRF + V1 prompt is the
+  recommended config.
+- **Prompt variants both lose to V1**: V2 (one-shot refusal example) ties
+  V1 on faith but introduces context-length errors. V3 (verbatim citation
+  instruction) actively hurts — faith down 0.12, correctness down 0.14, more
+  FP refusals. The simple prompt wins.
+- **Bigger embedder hurts generation despite better hit@1**: `embed_bge_large`
+  loses 0.12 on faith and 0.12 on correctness vs `default` even though it
+  retrieves better. Broader retrieval = more ambiguous context = lower
+  faithfulness scores.
+
+### Refusal
+
+- **Model-side refusal does all the work**: all 7 generation configs achieve
+  **perfect 8/8 OOS recall** through model self-refusal alone. Best refusal F1
+  = **0.842** (4 configs tied), driven by 3 false-positive refusals on
+  near-coverage in-scope cases (e.g. "small-company carve-out", nuclear-waste
+  CDA-vs-CCDA disambiguation).
+- **The configured `tau_low=0.30` floor never triggers**: bge-small returns
+  top-1 cosine 0.47–0.78 even on truly off-topic queries. The architect's
+  estimate (0.30–0.40 for bge-small) was too low for this corpus; layer 1 of
+  the two-layer refusal architecture is currently dead weight, and layer 2
+  (the model) is carrying 100% of the load.
 
 ## Hypotheses & assumptions
 
@@ -169,12 +204,19 @@ predictions before any experiment runs. Holding them to the data:
 
 | Hypothesis | Predicted | Measured | Verdict |
 |---|---|---|---|
-| Section-prepended chunking lifts hit@5 by 1–5 pp | + | -4.1 pp | **rejected** |
+| Section-prepended chunking lifts hit@5 by 1–5 pp | + | -4.1 pp on hit@5, -12.5 pp on adversarial | **rejected** |
 | BM25 ties dense on adversarial cases (exact-string signals) | yes | yes (0.750 = 0.750) | confirmed |
 | Hybrid RRF matches or beats either component | yes | hit@5 ties dense at 0.958 | confirmed |
 | Reranker lift on hit@5 is bounded by dense recall@20 | yes | +1.4 pp | confirmed |
 | Reranker lift > 5 pp ⇒ promote to default | conditional | 1.4 pp < 5 pp | not promoted |
 | Fine-tune triggers iff hit@5 < 0.85 ∧ gap < 2 pp | conditional | hit@5 = 0.972 | not triggered |
+| Reranker lift on hit@5 ⇒ better generation faith/corr | + | rerank vs default: faith -0.05, corr -0.02 | **rejected** |
+| bge-large lift on hit@1 ⇒ better generation faith/corr | + | embed_bge_large vs default: faith -0.12, corr -0.12 | **rejected** |
+| V2 (one-shot refusal example) reduces FP refusals | + | flat (3 → 3 FPs); +2 context-length errors | rejected |
+| V3 (verbatim citation) improves faithfulness | + | faith -0.12, refusal_F1 -0.08 | **rejected** |
+| Stacking everything (max) helps generation | uncertain | yes, weakly: faith +0.02, corr +0.05 over default | weakly confirmed |
+| Model-side refusal carries OOS recall ≥ 90 % | hopeful | 100 % (8/8 OOS) on all 7 generation configs | confirmed |
+| `tau_low=0.30` floor catches off-topic queries | + | floor never triggers (OOS top-1 ∈ [0.47, 0.78]) | **rejected** |
 
 Assumptions worth flagging to the reviewer:
 - **Eval set size**. 80 cases is enough to rank configs but not enough to
@@ -193,32 +235,49 @@ Assumptions worth flagging to the reviewer:
 
 In approximate order of expected return per hour of effort:
 
-1. **Set `OPENAI_API_KEY` and run Phase 4b** — generation faithfulness,
-   correctness (LLM-as-judge), ROUGE-L baseline, refusal precision/recall on
-   the 8 OOS cases, and `tau_low` calibration. This is the most consequential
-   gap remaining; ~$15-20 in API and ~30 min wall clock.
-2. **GPU acceleration** for the reranker variants. Drops per-query latency
-   from ~120 s to ~50 ms; with that, the reranker becomes a viable default
-   regardless of the 5 pp promotion threshold.
-3. **Grow the adversarial bucket** to ~16-24 cases stratified by trap type
+1. **Recalibrate `tau_low`**. The configured floor (0.30) currently never
+   triggers — on this corpus bge-small's top-1 cosine for OOS queries is
+   0.47–0.78. The §8 floor calibration sweep in `evals/RESULTS.md` shows
+   that raising to ~0.50 catches ~12% of OOS at the floor without an LLM
+   call, modest but free. The deeper question is whether bge-small can
+   discriminate OOS at all on this corpus; the answer for now is "barely",
+   and layer 2 (model self-refusal) is doing the real work.
+2. **Stronger judge model** (gpt-4o, claude-sonnet, etc.). Current judge is
+   the same `gpt-4o-mini` as the generator → self-evaluation bias. Faith
+   scores of 4.7+ are likely inflated by the bias. A separate, stronger
+   judge would tighten the rankings — particularly on the 0.02–0.05 deltas
+   between top configs that are currently within noise.
+3. **GPU acceleration** for the reranker variants. Drops per-query latency
+   from ~120 s on this 6-core CPU to ~50 ms on entry-level GPU; would make
+   `rerank` and `max` viable as defaults rather than experimental variants.
+4. **Investigate the 3 FP refusals** that recur across configs (`g_031`
+   small-company carve-out; `a_001` nuclear waste; `a_005` iron-and-steel
+   Article 8). All near-coverage corpus cases. The system reasonably plays
+   safe; a "covered but indirect" prompt instruction might recover them
+   without breaking the perfect 8/8 OOS recall.
+5. **Fix `_format_context` truncation**. One generator error in Phase 4b
+   was `context_length_exceeded` (case `m_005`, multi-FAQ pulling 5 long
+   chunks → 176k tokens > gpt-4o-mini's 128k). Truncate per chunk before
+   formatting.
+6. **Grow the adversarial bucket** to ~16-24 cases stratified by trap type
    (near-duplicates, lexical-overlap, boundary-numeric, semantic-vs-surface).
    Current 8-case bucket is suggestive; doubling stabilises per-config
    differences.
-4. **Voyage embedding variant** (`experiments/bge_large_hybrid_rerank.yaml`
+7. **Voyage embedding variant** (`experiments/bge_large_hybrid_rerank.yaml`
    is already set up as a non-default-embedding template). Tests whether a
    hosted SOTA embedding meaningfully beats local bge-large.
-5. **Real-user eval set**. Collect 50-100 real questions from
+8. **Real-user eval set**. Collect 50-100 real questions from
    sustainable-finance practitioners (typos, abbreviations, mixed languages)
    and re-score the matrix. The clean paraphrased eval set systematically
    over-estimates retrieval quality.
-6. **Embedding fine-tune** (Phase 5) becomes interesting *only if* a real-user
+9. **Embedding fine-tune** (Phase 5) becomes interesting *only if* a real-user
    eval set drops hit@5 below the 0.85 trigger threshold. The fine-tune
    pipeline is sketched in `DEFERRED.md`.
-7. **Caching of full retrieved-context blocks** — the current build relies on
-   the provider's automatic prefix caching, which only catches the system
-   prompt because the retrieved context varies per query. For repeated
-   near-duplicate queries (a real production pattern) a chunk-level cache or
-   semantic-cache layer could pay off.
+10. **Chunk-level / semantic-cache layer**. The current build relies on
+    the provider's automatic prefix caching, which only catches the system
+    prompt because the retrieved context varies per query. For repeated
+    near-duplicate queries (a real production pattern) a chunk-level cache
+    or semantic-cache could pay off.
 
 ## Project layout
 
