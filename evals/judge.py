@@ -74,7 +74,9 @@ class Judge:
         client_kwargs: dict[str, Any] = {}
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
-        self._client = OpenAI(**client_kwargs)
+        # max_retries=10 absorbs rate-limit bursts on free-tier providers.
+        # See generator.py for the rationale.
+        self._client = OpenAI(max_retries=10, **client_kwargs)
 
     def score(
         self,

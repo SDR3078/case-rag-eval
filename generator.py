@@ -97,7 +97,10 @@ class Generator:
         client_kwargs: dict = {}
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
-        self._client = OpenAI(**client_kwargs)
+        # max_retries=10 lets the SDK's exponential backoff absorb provider
+        # rate limits (Groq's free tier in particular) and transient
+        # connection errors without manual retry plumbing.
+        self._client = OpenAI(max_retries=10, **client_kwargs)
 
     # -- public ----------------------------------------------------------
 

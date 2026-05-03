@@ -291,8 +291,13 @@ def _generate_and_judge(
                 out["judge_rationale"] = f"judge error: {type(e).__name__}"
 
         # ROUGE-L against the canonical FAQ chunk text(s). For multi-FAQ cases
-        # the references are concatenated. Refused answers score 0 by fiat.
-        if not out["refused"]:
+        # the references are concatenated. Refused answers and generator-error
+        # stubs score 0 by fiat — measuring overlap against an error message
+        # produces meaningless small values.
+        gen_errored = out["answer"].startswith("[generator error:")
+        if out["refused"] or gen_errored:
+            out["rouge_l"] = 0.0
+        else:
             ref_texts = [
                 chunks_by_id[i].text
                 for i in case.expected_chunk_ids
@@ -301,8 +306,6 @@ def _generate_and_judge(
             out["rouge_l"] = (
                 rouge_l_against_chunks(out["answer"], ref_texts) if ref_texts else 0.0
             )
-        else:
-            out["rouge_l"] = 0.0
 
     return out
 
@@ -596,6 +599,9 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
     summary["was_built"] = was_built
     summary["n_oos"] = len(oos_records)
 
+    def _fmt(x: float | None, spec: str = ".3f") -> str:
+        return f"{x:{spec}}" if x is not None else "n/a"
+
     if full:
         gen_summary = _summarise_full(in_scope_records, oos_records)
         summary["generation"] = gen_summary
@@ -603,18 +609,20 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
         summary["generator_model"] = (generator.model if generator else None)
         summary["judge_model"] = (judge.model if judge else None)
         print(
-            f"[run] {name}: hit@5_any={summary['hit@5_any']:.3f} "
-            f"hit@5_all={summary['hit@5_all']:.3f} mrr={summary['mrr']:.3f} "
-            f"faith={gen_summary['faithfulness_mean']:.2f} "
-            f"corr={gen_summary['correctness_mean']:.2f} "
-            f"rouge_l={gen_summary['rouge_l_mean']:.3f} "
-            f"refusal_F1={(gen_summary['refusal_f1'] or 0):.3f}",
+            f"[run] {name}: hit@5_any={_fmt(summary['hit@5_any'])} "
+            f"hit@5_all={_fmt(summary['hit@5_all'])} mrr={_fmt(summary['mrr'])} "
+            f"faith={_fmt(gen_summary['faithfulness_mean'], '.2f')} "
+            f"corr={_fmt(gen_summary['correctness_mean'], '.2f')} "
+            f"rouge_l={_fmt(gen_summary['rouge_l_mean'])} "
+            f"refusal_F1={_fmt(gen_summary['refusal_f1'])} "
+            f"(judged {gen_summary['n_judged']}/{summary['n_cases_in_scope']}, "
+            f"refused TP={gen_summary['refusal_tp']}/{gen_summary['refusal_tp']+gen_summary['refusal_fn']})",
             flush=True,
         )
     else:
         print(
-            f"[run] {name}: hit@5_any={summary['hit@5_any']:.3f} "
-            f"hit@5_all={summary['hit@5_all']:.3f} mrr={summary['mrr']:.3f}",
+            f"[run] {name}: hit@5_any={_fmt(summary['hit@5_any'])} "
+            f"hit@5_all={_fmt(summary['hit@5_all'])} mrr={_fmt(summary['mrr'])}",
             flush=True,
         )
     return summary

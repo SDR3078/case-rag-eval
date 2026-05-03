@@ -4,7 +4,7 @@
 
 This file reports the experiment matrix from `docs/01_architecture.md`. Retrieval metrics — hit@1 / hit@3 / hit@5 (any-match), hit@5 (all-match for multi-FAQ cases), MRR, build-time, per-query latency — are populated for every config in §3. Generation metrics — LLM-judge faithfulness + correctness, ROUGE-L baseline, refusal precision/recall, `tau_low` calibration — populate §8 only for configs run with `--full` (generation requires `OPENAI_API_KEY`).
 
-Generation, LLM-as-judge faithfulness/correctness, ROUGE-L, refusal precision/recall, and `tau_low` calibration are deferred to Phase 4b until `OPENAI_API_KEY` (or any OpenAI-compatible endpoint via `OPENAI_BASE_URL`) is configured. See `DEFERRED.md` for the resume plan.
+**Generation status:** at least one config has been run with `--full`; per-config numbers appear in §8. Configs without generation data are listed with TBD.
 
 Voyage AI was excluded from the embedding axis because `VOYAGE_API_KEY` is not set; bge-small vs. bge-large still gives us a clean within-family comparison. Voyage can be added later by dropping a YAML into `experiments/` (see `bge_large_hybrid_rerank.yaml` for a non-default-embedding template).
 
@@ -27,7 +27,7 @@ Voyage AI was excluded from the embedding axis because `VOYAGE_API_KEY` is not s
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `chunking_section` | 0.792 | 0.917 | 0.917 | 0.889 | 0.856 | 72 | 30.9 | 19.1 |
 | `chunking_section_split_long` | 0.792 | 0.917 | 0.917 | 0.889 | 0.856 | 72 | 31.6 | 18.3 |
-| `default` | 0.833 | 0.931 | 0.958 | 0.917 | 0.883 | 72 | 0.0 | 33.7 |
+| `default` | 0.833 | 0.931 | 0.958 | 0.917 | 0.883 | 72 | 0.0 | 23.9 |
 | `embed_bge_large` | 0.875 | 0.958 | 0.958 | 0.944 | 0.916 | 72 | 259.2 | 165.6 |
 | `max` | 0.833 | 0.972 | 0.972 | 0.944 | 0.896 | 72 | 0.0 | 102823.3 |
 | `rerank` | 0.833 | 0.944 | 0.972 | 0.931 | 0.894 | 72 | 0.0 | 118613.6 |
@@ -73,4 +73,22 @@ Hit@5 (any) restricted to the 8 adversarial cases. These are the near-duplicate 
 
 ## 8. Generation results
 
-No `--full` runs yet. Once `OPENAI_API_KEY` is set, run `python -m evals.run --config experiments/<name>.yaml --full` to populate this section. The eval ships an OpenAI-compatible generator (`generator.py`) and an LLM-as-judge (`evals/judge.py`); both honour `OPENAI_BASE_URL` and the YAML's `generation.base_url` so any provider works (see DEFERRED.md).
+Per-config generation metrics (populated by `--full`). Faithfulness and correctness are 0–5 LLM-judge scores against the expected answer themes; ROUGE-L is a string-overlap baseline against the canonical FAQ chunk text(s). Refusal P/R is computed over the 80-case set (positive class = OOS that the system correctly refused). The judge defaults to the same model as the generator unless `judge.model` is set in the YAML — note the self-evaluation bias when both columns are filled by the same model.
+
+| config | prompt | generator | judge | faithfulness | correctness | ROUGE-L | refusal P | refusal R | refusal F1 |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|
+| `default` | `system_v1` | `gpt-4o-mini` | `gpt-4o-mini` | 4.77 | 4.63 | 0.308 | 0.727 | 1.000 | 0.842 |
+
+### Refusal floor calibration — `default`
+
+Floor-only refusal precision/recall at each `tau_low`, computed from logged top-1 dense scores. The configured value lives in the YAML; this sweep helps pick a calibrated knee.
+
+| tau_low | floor TP | floor FP | floor FN | precision | recall |
+|---:|---:|---:|---:|---:|---:|
+| 0.20 | 0 | 0 | 8 | - | 0.000 |
+| 0.25 | 0 | 0 | 8 | - | 0.000 |
+| 0.30 | 0 | 0 | 8 | - | 0.000 |
+| 0.35 | 0 | 0 | 8 | - | 0.000 |
+| 0.40 | 0 | 0 | 8 | - | 0.000 |
+| 0.45 | 0 | 0 | 8 | - | 0.000 |
+| 0.50 | 1 | 0 | 7 | 1.000 | 0.125 |
