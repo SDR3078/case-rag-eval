@@ -50,7 +50,7 @@ def _validate_query(query: str) -> str:
 def _build_pipeline(config: dict):
     """Construct the runtime pipeline objects from a config dict.
 
-    Returns `(retriever, reranker, generator, config)`. The retriever loads
+    Returns `(retriever, reranker, generator)`. The retriever loads
     its index from `index/{config.name}/`, which must already have been built
     by `python -m ingest --config <yaml>`.
     """

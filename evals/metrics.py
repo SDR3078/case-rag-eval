@@ -14,7 +14,7 @@ Conventions:
   retrieved list, or 0.0 if none is found.
 
 These are deliberately tiny (no numpy, no pandas) because the eval runner
-loops over 64 cases and 9 configs - wall-clock is dominated by retrieval,
+loops over 80 cases and 10 configs - wall-clock is dominated by retrieval,
 not metric arithmetic.
 """
 

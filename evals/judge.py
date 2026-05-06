@@ -18,7 +18,6 @@ from openai import OpenAI
 from retriever import RetrievalResult
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_PROMPT = PROJECT_ROOT / "prompts" / "judge_v1.md"
 
 
 def _format_context(retrieved: list[RetrievalResult]) -> str:

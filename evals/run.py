@@ -28,7 +28,7 @@ For OOS cases (`expected_behaviour == "refuse"`):
     - Always record top-1 similarity for `tau_low` calibration.
     - With --full, also generate (no judge) and record whether the system
       refused so refusal precision/recall and the tau_low sweep can land in
-      §8 of RESULTS.md.
+      §5 of RESULTS.md.
 
 Per-config raw results go to `evals/results/{config_name}/raw.jsonl`;
 aggregates merge into `evals/results/summary.json`; `evals/RESULTS.md` is
@@ -378,8 +378,9 @@ def _summarise_full(
     """Aggregate generation metrics from a `--full` run.
 
     Returns faithfulness/correctness/ROUGE-L means, refusal P/R/F1 over all
-    cases, and a `tau_low` floor-only sweep for refusal calibration. Cells are
-    `None` when generation data is missing (e.g. retrieval-only run).
+    cases, and a `tau_low` floor-only sweep for refusal calibration (P and R
+    columns only — F1 collapses the trade-off the sweep is designed to expose).
+    Cells are `None` when generation data is missing (e.g. retrieval-only run).
     """
     # Filter to records with judge data (in-scope cases that had generation done).
     judged = [
@@ -472,7 +473,7 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
 
     if full and not os.environ.get("OPENAI_API_KEY"):
         raise SystemExit(
-            "--full requires OPENAI_API_KEY (Phase 4b). "
+            "--full requires OPENAI_API_KEY (generation + judge). "
             "Re-run with --retrieval-only or see DEFERRED.md."
         )
 
@@ -556,8 +557,8 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
             raw_lines.append(row)
         else:
             # OOS: in retrieval-only mode we just record the top-1 score for
-            # later tau_low calibration (Phase 4b). When `full`, we also run
-            # generation so we can detect model-side refusals.
+            # later tau_low calibration. When `full`, we also run generation
+            # so we can detect model-side refusals.
             ids, scores, t_s = _retrieve_one(
                 retriever, reranker, config, case.question, k=RETRIEVE_K
             )
@@ -655,8 +656,8 @@ def run_config(config_path: Path, cases: list[Case], full: bool) -> dict:
 
 _DEFERRED_NOTE = (
     "Generation, LLM-as-judge faithfulness/correctness, ROUGE-L, refusal "
-    "precision/recall, and `tau_low` calibration are deferred to Phase 4b "
-    "until `OPENAI_API_KEY` (or any OpenAI-compatible endpoint via "
+    "precision/recall, and `tau_low` calibration are populated once "
+    "`OPENAI_API_KEY` (or any OpenAI-compatible endpoint via "
     "`OPENAI_BASE_URL`) is configured. See `DEFERRED.md` for the resume plan."
 )
 
@@ -676,12 +677,11 @@ def _format_ms(x: float | None) -> str:
 def _emit_results_md(summaries: list[dict]) -> str:
     """Build the full RESULTS.md text from the per-config summaries.
 
-    The structure here matches the deliverable spec: 1 overview, 2 configs run,
-    3 retrieval table, 4 per-axis commentary, 5 best-of summary, 6 fine-tune
-    trigger verdict, 7 adversarial breakdown, 8 generation placeholder.
+    Sections: 1 overview, 2 configs run, 3 retrieval table, 4 adversarial
+    breakdown, 5 generation results. Comparative analysis (per-axis effects,
+    best-of, fine-tune verdict) lives in `docs/01_architecture.md` §10
+    rather than as auto-emitted prose.
     """
-    by_name = {s["config_name"]: s for s in summaries}
-
     has_generation = any(s.get("generation") for s in summaries)
 
     lines: list[str] = []
@@ -695,7 +695,7 @@ def _emit_results_md(summaries: list[dict]) -> str:
         "for multi-FAQ cases), MRR, build-time, per-query latency — are populated "
         "for every config in §3. Generation metrics — LLM-judge faithfulness + "
         "correctness, ROUGE-L baseline, refusal precision/recall, `tau_low` "
-        "calibration — populate §8 only for configs run with `--full` "
+        "calibration — populate §5 only for configs run with `--full` "
         "(generation requires `OPENAI_API_KEY`)."
     )
     lines.append("")
@@ -704,7 +704,7 @@ def _emit_results_md(summaries: list[dict]) -> str:
     else:
         lines.append(
             "**Generation status:** at least one config has been run with "
-            "`--full`; per-config numbers appear in §8. Configs without "
+            "`--full`; per-config numbers appear in §5. Configs without "
             "generation data are listed with TBD."
         )
     lines.append("")
@@ -712,8 +712,8 @@ def _emit_results_md(summaries: list[dict]) -> str:
         "Voyage AI was excluded from the embedding axis because "
         "`VOYAGE_API_KEY` is not set; bge-small vs. bge-large still gives "
         "us a clean within-family comparison. Voyage can be added later "
-        "by dropping a YAML into `experiments/` (see "
-        "`bge_large_hybrid_rerank.yaml` for a non-default-embedding template)."
+        "by dropping a YAML into `experiments/` (copy `max.yaml` and switch "
+        "`embedding.backend` to `voyage_3_large`)."
     )
     lines.append("")
 
@@ -766,26 +766,8 @@ def _emit_results_md(summaries: list[dict]) -> str:
     )
     lines.append("")
 
-    # 4. Per-axis commentary
-    lines.append("## 4. Per-axis commentary")
-    lines.append("")
-    lines.append(_axis_commentary(by_name))
-    lines.append("")
-
-    # 5. Best-of summary
-    lines.append("## 5. Best-of-axes summary")
-    lines.append("")
-    lines.append(_best_of_summary(by_name))
-    lines.append("")
-
-    # 6. Fine-tune trigger
-    lines.append("## 6. Fine-tune trigger evaluation (architecture s10)")
-    lines.append("")
-    lines.append(_fine_tune_verdict(by_name))
-    lines.append("")
-
-    # 7. Adversarial breakdown
-    lines.append("## 7. Adversarial breakdown")
+    # 4. Adversarial breakdown
+    lines.append("## 4. Adversarial breakdown")
     lines.append("")
     lines.append(
         "Hit@5 (any) restricted to the 8 adversarial cases. These are the "
@@ -808,14 +790,12 @@ def _emit_results_md(summaries: list[dict]) -> str:
             )
         )
     lines.append("")
-    lines.append(_adversarial_commentary(by_name))
-    lines.append("")
 
-    # 8. Generation results — populated when --full has been run on at least
+    # 5. Generation results — populated when --full has been run on at least
     # one config. Configs without generation data show TBD rows so the reader
     # can see what's still to come.
     gen_configs = [s for s in summaries if s.get("generation")]
-    lines.append("## 8. Generation results")
+    lines.append("## 5. Generation results")
     lines.append("")
     if gen_configs:
         lines.append(
@@ -899,291 +879,6 @@ def _emit_results_md(summaries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _axis_commentary(by_name: dict[str, dict]) -> str:
-    """Per-axis paragraphs. Each holds all but one axis fixed to baseline.
-
-    Baselines: chunking=per_question, embedding=bge_small, retrieval=dense,
-    reranker=none. The variants below isolate one axis each. Each paragraph
-    degrades gracefully if a referenced config has not been run yet, since
-    `--config` invocations populate RESULTS.md incrementally.
-    """
-    lines: list[str] = []
-
-    def get(*names: str) -> dict | None:
-        for n in names:
-            if n in by_name:
-                return by_name[n]
-        return None
-
-    base = get("default")
-    chunk_a = get("chunking_section")
-    chunk_b = get("chunking_section_split_long")
-    big = get("embed_bge_large")
-    bm25 = get("retrieval_bm25")
-    hybr = get("retrieval_hybrid")
-    rerank = get("rerank")
-
-    def num(s: dict | None, k: str) -> str:
-        if s is None or s.get(k) is None:
-            return "-"
-        return f"{s[k]:.3f}"
-
-    def bt(s: dict | None) -> str:
-        if s is None or s.get("build_time_s") is None:
-            return "-"
-        return f"{s['build_time_s']:.1f}s"
-
-    # 4.1 Chunking
-    base_h5 = base["hit@5_any"] if base and base.get("hit@5_any") is not None else None
-    a_h5 = chunk_a["hit@5_any"] if chunk_a and chunk_a.get("hit@5_any") is not None else None
-    if base_h5 is not None and a_h5 is not None:
-        delta_pp = (a_h5 - base_h5) * 100.0
-        if delta_pp >= 1.0:
-            verdict = (
-                "matches the architect's predicted small lift from the section "
-                "prior (3-6 high-signal tokens of disambiguation context)."
-            )
-        elif delta_pp > -1.0:
-            verdict = (
-                "is essentially flat — the predicted small lift from the "
-                "section prior didn't materialise on this corpus."
-            )
-        else:
-            verdict = (
-                f"**hurt** hit@5_any by {-delta_pp:.1f} pp, the **opposite** "
-                "of the architect's prediction. Plausible mechanism: section "
-                "name biases the embedding toward the section centroid rather "
-                "than the specific question, increasing intra-section confusion."
-            )
-    else:
-        verdict = ""
-    lines.append(
-        "**Chunking.** Baseline (`default`, per-question) sits at "
-        f"hit@5_any = {num(base, 'hit@5_any')}. Section-prepended chunking "
-        f"(`chunking_section`) lands at {num(chunk_a, 'hit@5_any')} — {verdict} "
-        "Splitting long entries on top (`chunking_section_split_long`) reaches "
-        f"{num(chunk_b, 'hit@5_any')}. The corpus has only a handful of "
-        ">800-token outliers, so most chunks pass through the splitter "
-        "untouched — splitting moves the needle only on the long-entry tail "
-        "(the FINREP block, the long 'what should financial companies report' "
-        "answer)."
-    )
-    lines.append("")
-
-    # 4.2 Embedding
-    lines.append(
-        "**Embedding model.** Holding chunking, retrieval, and reranker fixed "
-        "to baseline, swapping bge-small for bge-large moved hit@5_any from "
-        f"{num(base, 'hit@5_any')} to {num(big, 'hit@5_any')} and MRR from "
-        f"{num(base, 'mrr')} to {num(big, 'mrr')}. Build time changed from "
-        f"{bt(base)} to {bt(big)} (one-off; cached afterward). Per-query "
-        "latency stays in the same ballpark - the index lookup is still a "
-        "single dot product, just over a wider matrix (1024 dims vs. 384). "
-        "Voyage was not run (no API key), so this is a within-family "
-        "comparison; reviewers wanting a hosted-SOTA reference can drop a "
-        "Voyage YAML in `experiments/` once the key is available."
-    )
-    lines.append("")
-
-    # 4.3 Retrieval method
-    lines.append(
-        "**Retrieval method.** With per-question chunking + bge-small + no "
-        "rerank, dense retrieval (`default`) gives hit@5_any = "
-        f"{num(base, 'hit@5_any')}, BM25-only (`retrieval_bm25`) gives "
-        f"{num(bm25, 'hit@5_any')}, and hybrid RRF (`retrieval_hybrid`) gives "
-        f"{num(hybr, 'hit@5_any')}. The FAQ corpus has heavy term repetition "
-        "('Article 8', 'TSC', 'CapEx', section codes), so BM25 is genuinely a "
-        "tough baseline - article references are exact-match signals dense "
-        "models routinely fumble. Hybrid RRF needs no tunable weight and "
-        "reliably matches or beats either component when neither one "
-        "dominates."
-    )
-    lines.append("")
-
-    # 4.4 Reranker
-    rerank_h5 = rerank["hit@5_any"] if rerank and rerank.get("hit@5_any") is not None else None
-    base_h5 = base["hit@5_any"] if base and base.get("hit@5_any") is not None else None
-    if rerank_h5 is not None and base_h5 is not None:
-        lift_pp = (rerank_h5 - base_h5) * 100.0
-        promoted = "**promotes to default**" if lift_pp > 5.0 else "**stays a variant**"
-        lift_clause = (
-            f" Lift over the dense baseline = **{lift_pp:+.1f} pp**, "
-            f"vs the architecture's 5-pp promotion threshold (§5) — reranker "
-            f"{promoted}."
-        )
-    else:
-        lift_clause = ""
-    lines.append(
-        "**Reranker.** Cross-encoder reranking (bge-reranker-v2-m3) on top of "
-        "the baseline dense pipeline moved hit@5_any from "
-        f"{num(base, 'hit@5_any')} to {num(rerank, 'hit@5_any')} and MRR from "
-        f"{num(base, 'mrr')} to {num(rerank, 'mrr')}. The reranker primarily "
-        "reorders results that dense already surfaces (its lift on hit@5 is "
-        "bounded by recall@20 of the dense first stage), so MRR is the more "
-        "sensitive headline." + lift_clause
-    )
-    return "\n".join(lines)
-
-
-def _best_of_summary(by_name: dict[str, dict]) -> str:
-    """Top configs by hit@5_any with tie handling and MRR tiebreaker."""
-    summaries = [s for s in by_name.values() if s.get("hit@5_any") is not None]
-    if not summaries:
-        return "_No retrieval data yet._"
-    sorted_h5 = sorted(summaries, key=lambda s: s["hit@5_any"], reverse=True)
-    top_h5 = sorted_h5[0]["hit@5_any"]
-    h5_winners = [s for s in sorted_h5 if s["hit@5_any"] == top_h5]
-    base = by_name.get("default")
-    base_h5 = base["hit@5_any"] if base else None
-    diff_to_baseline = (top_h5 - base_h5) if base_h5 is not None else None
-
-    parts: list[str] = []
-    if len(h5_winners) == 1:
-        s = h5_winners[0]
-        parts.append(
-            f"On hit@5_any, **`{s['config_name']}`** wins at "
-            f"{s['hit@5_any']:.3f} (MRR {s['mrr']:.3f})."
-        )
-        if len(sorted_h5) > 1:
-            nb = sorted_h5[1]
-            gap_pp = (top_h5 - nb["hit@5_any"]) * 100.0
-            parts.append(
-                f"Next best: `{nb['config_name']}` at {nb['hit@5_any']:.3f} "
-                f"(gap = {gap_pp:.1f} pp)."
-            )
-    else:
-        names = ", ".join(f"`{w['config_name']}`" for w in h5_winners)
-        mrr_best = max(h5_winners, key=lambda x: x.get("mrr") or 0.0)
-        parts.append(
-            f"**{len(h5_winners)}-way tie at hit@5_any = {top_h5:.3f}**: {names}. "
-            f"MRR breaks the tie: `{mrr_best['config_name']}` at "
-            f"{mrr_best['mrr']:.3f}."
-        )
-
-    # Best MRR overall — separate concern when the MRR winner isn't in the
-    # hit@5 winning set (different "best" configs depending on metric).
-    sorted_mrr = sorted(summaries, key=lambda s: s.get("mrr") or 0.0, reverse=True)
-    if sorted_mrr:
-        mrr_winner = sorted_mrr[0]
-        winner_names = {w["config_name"] for w in h5_winners}
-        if mrr_winner["config_name"] not in winner_names:
-            parts.append(
-                f"Best MRR: **`{mrr_winner['config_name']}`** at "
-                f"{mrr_winner['mrr']:.3f} (hit@5_any={mrr_winner['hit@5_any']:.3f}) — "
-                "different metric, different winner."
-            )
-
-    if diff_to_baseline is not None:
-        parts.append(
-            f"Lift over `default`: {diff_to_baseline*100:.1f} pp on hit@5_any."
-        )
-    return " ".join(parts)
-
-
-def _fine_tune_verdict(by_name: dict[str, dict]) -> str:
-    """Apply the architecture s10 trigger rule to the matrix.
-
-    Trigger fires iff best non-FT hit@5 < 0.85 AND gap to next-best < 2 pp.
-    """
-    sorted_summaries = sorted(
-        by_name.values(), key=lambda s: s["hit@5_any"] or 0.0, reverse=True
-    )
-    best = sorted_summaries[0]
-    next_best = sorted_summaries[1] if len(sorted_summaries) > 1 else None
-    best_h5 = best["hit@5_any"]
-    next_h5 = next_best["hit@5_any"] if next_best else None
-    gap_pp = (best_h5 - next_h5) * 100 if (next_h5 is not None) else None
-
-    cond_low = best_h5 < 0.85
-    cond_plateau = gap_pp is not None and gap_pp < 2.0
-    fires = cond_low and cond_plateau
-
-    verdict = "FIRES" if fires else "does NOT fire"
-
-    reasoning_parts: list[str] = []
-    reasoning_parts.append(
-        f"Best non-FT hit@5_any = **{best_h5:.3f}** "
-        f"(`{best['config_name']}`); next-best = "
-        f"**{next_h5:.3f}** (`{next_best['config_name']}`) so the gap is "
-        f"**{gap_pp:.2f} pp**." if next_best else
-        f"Best non-FT hit@5_any = **{best_h5:.3f}**."
-    )
-
-    if cond_low and not cond_plateau:
-        reasoning_parts.append(
-            f"Hit@5 is below the 0.85 ceiling but the {gap_pp:.2f} pp gap to "
-            "the next-best variant is wide - configurations are still pulling "
-            "in different directions, which means we have headroom from "
-            "design choices and have not actually plateaued. Fine-tune is **deferred**."
-        )
-    elif cond_plateau and not cond_low:
-        reasoning_parts.append(
-            "The matrix has plateaued (gap < 2 pp) but hit@5 already clears "
-            "the 0.85 ceiling, so the marginal lift a fine-tune would deliver "
-            "cannot justify the engineering cost. Fine-tune is **skipped**; "
-            "generation faithfulness becomes the next bottleneck (Phase 4b)."
-        )
-    elif cond_low and cond_plateau:
-        reasoning_parts.append(
-            "Both conditions are met. **Fine-tune trigger fires** per "
-            "architecture s10. The next move is the synthetic-query + MNRL "
-            "training run on bge-small described in `DEFERRED.md` Phase 5."
-        )
-    else:
-        reasoning_parts.append(
-            "Hit@5 already clears the 0.85 ceiling, so fine-tune is "
-            "**skipped**. The matrix has not plateaued either, but the "
-            "primary trigger condition (hit@5 < 0.85) is what the rule "
-            "tests first; either condition failing is sufficient to skip. "
-            "Phase 4b focuses on generation quality instead."
-        )
-
-    return f"**Verdict: trigger {verdict}.** " + " ".join(reasoning_parts)
-
-
-def _adversarial_commentary(by_name: dict[str, dict]) -> str:
-    """Top + bottom on the adversarial subset, with tie handling.
-
-    Reports who ties for first, who trails, and the gap. Avoids speculative
-    prose about *why* a config wins/loses — the data is what it is, and
-    causal claims belong in the architecture doc, not auto-generated text.
-    """
-    summaries = [s for s in by_name.values() if s.get("adversarial_hit@5_any") is not None]
-    if not summaries:
-        return ""
-    by_adv = sorted(summaries, key=lambda s: s["adversarial_hit@5_any"], reverse=True)
-    top_score = by_adv[0]["adversarial_hit@5_any"]
-    bot_score = by_adv[-1]["adversarial_hit@5_any"]
-    top_names = sorted(s["config_name"] for s in by_adv if s["adversarial_hit@5_any"] == top_score)
-    bot_names = sorted(s["config_name"] for s in by_adv if s["adversarial_hit@5_any"] == bot_score)
-
-    parts: list[str] = []
-    if len(top_names) == 1:
-        parts.append(
-            f"`{top_names[0]}` leads adversarial at hit@5_any = {top_score:.3f}."
-        )
-    else:
-        names = ", ".join(f"`{n}`" for n in top_names)
-        parts.append(
-            f"{len(top_names)} configs tie at adversarial hit@5_any = "
-            f"{top_score:.3f}: {names}."
-        )
-
-    if bot_score < top_score:
-        bot_label = ", ".join(f"`{n}`" for n in bot_names)
-        gap_pp = (top_score - bot_score) * 100.0
-        parts.append(
-            f"At the bottom: {bot_label} at {bot_score:.3f} "
-            f"({gap_pp:.1f} pp behind the leader)."
-        )
-
-    parts.append(
-        "With only 8 adversarial cases the per-config differences are 1-2 "
-        "cases each; the adversarial bucket is suggestive, not definitive."
-    )
-    return " ".join(parts)
-
-
 # --- CLI entrypoint --------------------------------------------------------
 
 
@@ -1201,9 +896,9 @@ def main(argv: list[str] | None = None) -> int:
     grp.add_argument("--all", action="store_true", help="Run every YAML in experiments/.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--retrieval-only", action="store_true",
-                      help="Phase 4a: retrieval metrics only (default).")
+                      help="Run retrieval metrics only (hit@k, MRR). Default mode.")
     mode.add_argument("--full", action="store_true",
-                      help="Phase 4b: also run generation + judge + refusal. "
+                      help="Also run generation, LLM-judge, ROUGE-L, refusal P/R. "
                            "Requires OPENAI_API_KEY; uses OPENAI_BASE_URL "
                            "or YAML generation.base_url for non-OpenAI providers.")
     parser.add_argument("--cases", default=str(DEFAULT_CASES),

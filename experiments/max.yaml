@@ -1,8 +1,6 @@
 # Best-of-axes "max" config: section-prepended chunking + outlier splitting +
 # bge-large embeddings + hybrid (dense+BM25, RRF) + cross-encoder reranker.
-# This stacks every axis lift the matrix surfaces. Sister config
-# `bge_large_hybrid_rerank.yaml` does the same minus split_long, so the pair lets
-# us isolate whether splitting helps on top of an already strong stack.
+# This stacks every axis lift the matrix surfaces.
 
 name: max
 

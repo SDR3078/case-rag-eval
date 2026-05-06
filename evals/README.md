@@ -1,6 +1,6 @@
 # Evaluation set — `cases.jsonl`
 
-The eval set drives Phase 4's metrics: retrieval (hit@k, MRR, recall@k),
+The eval set drives the eval pipeline's metrics: retrieval (hit@k, MRR, recall@k),
 generation (LLM-as-judge faithfulness/correctness + ROUGE-L baseline) and
 refusal precision/recall. This README documents what is in the file, how the
 80 cases were sourced, and how to extend it.
@@ -163,7 +163,7 @@ subset.
   Some reviewers might argue that *o_005* (EU ETS) is sufficiently
   EU-climate-policy-adjacent that a charitable system should retrieve and
   decline rather than refuse outright; the cases shipped here treat that as a
-  refusal because Phase 4 needs a binary label. This is a known scoring edge.
+  refusal because the refusal eval needs a binary label. This is a known scoring edge.
 - **No multilingual coverage.** All 80 cases are English. The corpus
   occasionally quotes French/German legal terms but the FAQ prose is English,
   and the take-home brief does not require multilingual support.
@@ -176,4 +176,4 @@ subset.
 - `cases.jsonl` — 80 cases, one JSON per line.
 - `validate_cases.py` — schema and chunk-id integrity check; exits non-zero
   on any failure. Run before commits that touch this directory.
-- `RESULTS.md` (Phase 4) — populated by the eval runner.
+- `RESULTS.md` — populated by the eval runner.

@@ -3,21 +3,24 @@
 A single-shot retrieval-augmented Q&A bot over the EU Taxonomy Navigator FAQs
 (329 entries across 7 sections). Built for the Sopra Steria NLP take-home.
 
-The 72-hour deadline in the brief was deliberately dropped in favour of a
-thorough experimentation matrix and a defensible eval: 80 hand-curated cases ×
-**10 retrieval configs** with full retrieval metrics, **7 of which were also
-run with `--full`** (generation through `gpt-4o-mini` plus LLM-as-judge
-faithfulness + correctness + ROUGE-L + refusal P/R + `tau_low` calibration).
-See [`docs/01_architecture.md`](docs/01_architecture.md) for the design
-rationale and [`evals/RESULTS.md`](evals/RESULTS.md) for measured results
-(retrieval table + generation table + tau_low floor calibration sweep).
+The build prioritises a thorough experimentation matrix and a defensible
+eval: 80 hand-curated cases × **10 retrieval configs** with full retrieval
+metrics, **7 of which were also run with `--full`** (generation through
+`gpt-4o-mini` plus LLM-as-judge faithfulness + correctness + ROUGE-L +
+refusal P/R + `tau_low` calibration). See [`docs/01_architecture.md`](docs/01_architecture.md)
+for the design rationale and [`evals/RESULTS.md`](evals/RESULTS.md) for
+measured results (retrieval table + generation table + tau_low floor
+calibration sweep).
 
 ## How to read this repo (recommended order)
 
 1. **`docs/01_architecture.md`** — every design choice and *why*. Read this
    first; the rest of the repo executes on it.
-2. **`evals/RESULTS.md`** — what the matrix actually showed. Per-axis
-   commentary, best-of summary, fine-tune trigger verdict, adversarial breakdown.
+2. **`evals/RESULTS.md`** — what the matrix actually showed: retrieval table
+   (hit@k / MRR / latency for all 10 configs), adversarial breakdown, and
+   generation table + `tau_low` floor calibration sub-table for the 7
+   `--full` configs. Comparative analysis (per-axis effects, best-of, fine-tune
+   verdict) lives in `docs/01_architecture.md` §10.
 3. **`ingest.py`** — chunking strategies and embedding backends (BGE/Voyage),
    with the BGE query/passage prefix asymmetry encoded explicitly. The longest
    module at ~490 lines, but each concern (parsing / chunking / embedding /
@@ -156,12 +159,12 @@ distilled story.)
 - **Best MRR = 0.916** (`embed_bge_large`). bge-large is 9× slower per query
   than bge-small but lifts hit@1 from 0.833 to 0.875. Different headline →
   different winner.
-- **Counter-prediction**: section-prepended chunking *hurt* hit@5 by 4.1 pp
-  and adversarial by 12.5 pp. The architect's prediction of a small lift
-  flipped sign on this corpus.
+- **Counter-intuitive**: section-prepended chunking *hurt* hit@5 by 4.1 pp
+  and adversarial by 12.5 pp. The expected small lift from added section
+  context flipped sign on this corpus.
 - **Stacking is sub-additive on hit@5**: `max` ties `rerank` exactly. The
   reranker absorbs all available retrieval headroom.
-- **Fine-tune trigger does not fire** (hit@5 = 0.972 ≫ 0.85). Phase 5 is
+- **Fine-tune trigger does not fire** (hit@5 = 0.972 ≫ 0.85). Fine-tune is
   intentionally skipped per architecture §10.
 
 ### Generation (gpt-4o-mini through OpenAI proper, gpt-4o-mini also as LLM-judge)
@@ -172,9 +175,9 @@ distilled story.)
   corpus is small and clean enough that any reasonable retrieval feeds
   gpt-4o-mini well.
 - **`retrieval_hybrid` is the practical winner**: matches `max` (the absolute
-  empirical winner) on faith/corr within noise, but runs **~5000× faster** per
-  query (no CPU cross-encoder). For production, hybrid RRF + V1 prompt is the
-  recommended config.
+  empirical winner) on faith/corr within noise, but runs **thousands of times
+  faster** per query (no CPU cross-encoder). For production, hybrid RRF + V1
+  prompt is the recommended config.
 - **Prompt variants both lose to V1**: V2 (one-shot refusal example) ties
   V1 on faith but introduces context-length errors. V3 (verbatim citation
   instruction) actively hurts — faith down 0.12, correctness down 0.14, more
@@ -197,28 +200,33 @@ distilled story.)
   the two-layer refusal architecture is currently dead weight, and layer 2
   (the model) is carrying 100% of the load.
 
-## Hypotheses & assumptions
+## Findings
 
-The architecture document (`docs/01_architecture.md`) commits to specific
-predictions before any experiment runs. Holding them to the data:
+The matrix tests every axis the architecture document considered. The
+table summarises what the data showed against going-in intuition: some
+outcomes lined up, others contradicted it. The counter-intuitive rows
+are the most informative — they tell you where the corpus and model
+behave differently than RAG folklore predicts.
 
-| Hypothesis | Predicted | Measured | Verdict |
+| Question | Going-in expectation | Measured | Outcome |
 |---|---|---|---|
-| Section-prepended chunking lifts hit@5 by 1–5 pp | + | -4.1 pp on hit@5, -12.5 pp on adversarial | **rejected** |
-| BM25 ties dense on adversarial cases (exact-string signals) | yes | yes (0.750 = 0.750) | confirmed |
-| Hybrid RRF matches or beats either component | yes | hit@5 ties dense at 0.958 | confirmed |
-| Reranker lift on hit@5 is bounded by dense recall@20 | yes | +1.4 pp | confirmed |
-| Reranker lift > 5 pp ⇒ promote to default | conditional | 1.4 pp < 5 pp | not promoted |
-| Fine-tune triggers iff hit@5 < 0.85 ∧ gap < 2 pp | conditional | hit@5 = 0.972 | not triggered |
-| Reranker lift on hit@5 ⇒ better generation faith/corr | + | rerank vs default: faith -0.05, corr -0.02 | **rejected** |
-| bge-large lift on hit@1 ⇒ better generation faith/corr | + | embed_bge_large vs default: faith -0.12, corr -0.12 | **rejected** |
-| V2 (one-shot refusal example) reduces FP refusals | + | flat (3 → 3 FPs); +2 context-length errors | rejected |
-| V3 (verbatim citation) improves faithfulness | + | faith -0.12, refusal_F1 -0.08 | **rejected** |
-| Stacking everything (max) helps generation | uncertain | yes, weakly: faith +0.02, corr +0.05 over default | weakly confirmed |
-| Model-side refusal carries OOS recall ≥ 90 % | hopeful | 100 % (8/8 OOS) on all 7 generation configs | confirmed |
-| `tau_low=0.30` floor catches off-topic queries | + | floor never triggers (OOS top-1 ∈ [0.47, 0.78]) | **rejected** |
+| Does section-prepended chunking lift hit@5 by 1–5 pp? | + | -4.1 pp on hit@5, -12.5 pp on adversarial | **counter** |
+| Does BM25 tie dense on adversarial cases (exact-string signals)? | yes | yes (0.750 = 0.750) | as expected |
+| Does hybrid RRF match or beat either component? | yes | hit@5 ties dense at 0.958 | as expected |
+| Is the reranker lift on hit@5 bounded by dense recall@20? | yes | +1.4 pp | as expected |
+| Reranker lift > 5 pp ⇒ promote to default? | conditional rule | 1.4 pp < 5 pp | not promoted |
+| Fine-tune trigger fires iff hit@5 < 0.85 ∧ gap < 2 pp? | conditional rule | hit@5 = 0.972 | not triggered |
+| Does reranker lift on hit@5 translate into better generation faith/corr? | + | rerank vs default: faith -0.05, corr -0.02 | **counter** |
+| Does bge-large's hit@1 lift translate into better generation faith/corr? | + | embed_bge_large vs default: faith -0.12, corr -0.12 | **counter** |
+| Does V2 (one-shot refusal example) reduce FP refusals? | + | flat (3 → 3 FPs); +2 context-length errors | counter |
+| Does V3 (verbatim citation) improve faithfulness? | + | faith -0.12, refusal_F1 -0.08 | **counter** |
+| Does stacking everything (max) help generation? | uncertain | yes, weakly: faith +0.02, corr +0.05 over default | weakly yes |
+| Does model-side refusal carry OOS recall ≥ 90 %? | hopeful | 100 % (8/8 OOS) on all 7 generation configs | as expected |
+| Does the `tau_low=0.30` floor catch off-topic queries? | + | floor never triggers (OOS top-1 ∈ [0.47, 0.78]) | **counter** |
 
-Assumptions worth flagging to the reviewer:
+### Caveats
+
+Worth flagging to the reviewer:
 - **Eval set size**. 80 cases is enough to rank configs but not enough to
   characterise the failure surface (especially the 8-case adversarial bucket
   where one case is 12.5 pp).
@@ -229,7 +237,7 @@ Assumptions worth flagging to the reviewer:
   bounds versus production traffic where users phrase questions worse.
 - **CPU-only constraint** on the host shaped some run-time decisions (the
   reranker took ~120 s/query); on a GPU the latency math reverses and the
-  reranker becomes practical as the default. See `evals/RESULTS.md` §4.
+  reranker becomes practical as the default.
 
 ## Future improvements
 
@@ -237,7 +245,7 @@ In approximate order of expected return per hour of effort:
 
 1. **Recalibrate `tau_low`**. The configured floor (0.30) currently never
    triggers — on this corpus bge-small's top-1 cosine for OOS queries is
-   0.47–0.78. The §8 floor calibration sweep in `evals/RESULTS.md` shows
+   0.47–0.78. The §5 floor calibration sub-table in `evals/RESULTS.md` shows
    that raising to ~0.50 catches ~12% of OOS at the floor without an LLM
    call, modest but free. The deeper question is whether bge-small can
    discriminate OOS at all on this corpus; the answer for now is "barely",
@@ -255,7 +263,7 @@ In approximate order of expected return per hour of effort:
    Article 8). All near-coverage corpus cases. The system reasonably plays
    safe; a "covered but indirect" prompt instruction might recover them
    without breaking the perfect 8/8 OOS recall.
-5. **Fix `_format_context` truncation**. One generator error in Phase 4b
+5. **Fix `_format_context` truncation**. One generator error in the full eval
    was `context_length_exceeded` (case `m_005`, multi-FAQ pulling 5 long
    chunks → 176k tokens > gpt-4o-mini's 128k). Truncate per chunk before
    formatting.
@@ -263,16 +271,16 @@ In approximate order of expected return per hour of effort:
    (near-duplicates, lexical-overlap, boundary-numeric, semantic-vs-surface).
    Current 8-case bucket is suggestive; doubling stabilises per-config
    differences.
-7. **Voyage embedding variant** (`experiments/bge_large_hybrid_rerank.yaml`
-   is already set up as a non-default-embedding template). Tests whether a
-   hosted SOTA embedding meaningfully beats local bge-large.
+7. **Voyage embedding variant**. Copy `experiments/max.yaml` and switch
+   `embedding.backend: voyage_3_large` (set `VOYAGE_API_KEY` first). Tests
+   whether a hosted SOTA embedding meaningfully beats local bge-large.
 8. **Real-user eval set**. Collect 50-100 real questions from
    sustainable-finance practitioners (typos, abbreviations, mixed languages)
    and re-score the matrix. The clean paraphrased eval set systematically
    over-estimates retrieval quality.
-9. **Embedding fine-tune** (Phase 5) becomes interesting *only if* a real-user
-   eval set drops hit@5 below the 0.85 trigger threshold. The fine-tune
-   pipeline is sketched in `DEFERRED.md`.
+9. **Embedding fine-tune** becomes interesting *only if* a real-user eval set
+   drops hit@5 below the 0.85 trigger threshold. The fine-tune pipeline is
+   sketched in `docs/01_architecture.md` §10.
 10. **Chunk-level / semantic-cache layer**. The current build relies on
     the provider's automatic prefix caching, which only catches the system
     prompt because the retrieved context varies per query. For repeated
@@ -293,7 +301,7 @@ experiments/        small YAML configs, one per matrix variant
 evals/              cases.jsonl + run.py + metrics + RESULTS.md
 docs/               architecture + corpus + (this README points at 01_architecture.md)
 index/              built indexes (gitignored, rebuilt on demand)
-DEFERRED.md         Phase 4b plan (API-gated work)
+DEFERRED.md         provider/judge swap guide for re-running --full
 ```
 
 ## Adding eval cases / configs

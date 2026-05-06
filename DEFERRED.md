@@ -1,10 +1,10 @@
 # Deferred work — what remains for follow-up runs
 
-**Phase 4a and Phase 4b are both complete.** [`evals/RESULTS.md`](evals/RESULTS.md)
+**Retrieval and generation evals are both complete.** [`evals/RESULTS.md`](evals/RESULTS.md)
 contains the full retrieval matrix (10 configs) and the populated generation
 table (7 configs run with `--full` through `gpt-4o-mini` on OpenAI proper,
 gpt-4o-mini also as the LLM-as-judge). What's documented here is **rerunnable
-follow-up work** — both for re-running Phase 4b on a different provider /
+follow-up work** — both for re-running the full eval on a different provider /
 model, and for the optional Voyage embedding variant.
 
 The backend is **OpenAI-compatible** (see `generator.py` and `evals/judge.py`).
@@ -27,7 +27,7 @@ export OPENAI_API_KEY=sk-...
 `llama-3.3-70b-versatile`. For other providers, copy and tweak the two fields
 under `generation:`.
 
-## Re-running Phase 4b on a different provider/model
+## Re-running --full on a different provider/model
 
 ```bash
 # One config end-to-end (~6 min for 80 cases × 2 calls on OpenAI gpt-4o-mini):
@@ -38,7 +38,7 @@ python -m evals.run --all --full
 ```
 
 What `--full` does per case:
-1. **Retrieval** as in Phase 4a (already cached for the existing configs).
+1. **Retrieval** as in retrieval-only mode (already cached for the existing configs).
 2. **Generation** — calls the configured `generation.model` through the
    `Generator` class.
 3. **Refusal-floor short-circuit** — if dense top-1 < `tau_low`, skip
@@ -82,9 +82,8 @@ judge:
 ## Voyage embedding variant (optional)
 
 If `VOYAGE_API_KEY` is set, drop a YAML in `experiments/` modelled on
-`bge_large_hybrid_rerank.yaml` but with `embedding.backend: voyage_3_large`.
-Build the index, then re-run the embedding axis with Voyage as a third
-data point.
+`max.yaml` but with `embedding.backend: voyage_3_large`. Build the index,
+then re-run the embedding axis with Voyage as a third data point.
 
 The current matrix shows bge-large already underperforms bge-small on
 generation faith/corr despite better hit@1 (broader retrieval = more
@@ -103,4 +102,3 @@ python -m app "test question"
 ```
 
 Confirm everything runs end-to-end without manual intervention.
-

@@ -47,8 +47,8 @@ Three models in the matrix, chosen to span the cost / quality / locality dimensi
 | Model | Dim | Host | Cost (~per 1M tokens) | Why include |
 |---|---|---|---|---|
 | **`bge-small-en-v1.5`** (default) | 384 | local sentence-transformers | $0 | Strong baseline on MTEB, tiny (~33M params), runs CPU-only in seconds for 329 chunks. Surfaces what a local-only deployment can do. |
-| **`bge-large-en-v1.5`** | 1024 | local sentence-transformers | $0 | Same family, materially stronger on retrieval benchmarks. Lets us isolate "model size" as the variable while holding the family constant. ~335M params, runs on CPU in a minute for the full index, sub-100ms per query. |
-| **Voyage `voyage-3-large`** (or `voyage-3`) | 1024 | API (Anthropic-recommended) | ~$0.18 / 1M tokens | API-class quality, Anthropic's recommended pairing with Claude. Tests whether a hosted SOTA model meaningfully beats local large. The corpus is ~200k tokens to embed once, plus negligible per-query cost — the entire eval costs cents. |
+| **`bge-large-en-v1.5`** | 1024 | local sentence-transformers | $0 | Same family, materially stronger on retrieval benchmarks. Lets us isolate "model size" as the variable while holding the family constant. ~335M params, runs on CPU in a minute for the full index, ~200ms per query. |
+| **Voyage `voyage-3-large`** (or `voyage-3`) | 1024 | API | ~$0.18 / 1M tokens | API-class quality. Tests whether a hosted SOTA embedding meaningfully beats local large. The corpus is ~200k tokens to embed once, plus negligible per-query cost — the entire eval costs cents. |
 
 Rejected:
 - **`all-MiniLM-L6-v2`** — too weak vs. `bge-small`; would only show up as a "look at how bad we used to have it" baseline, not interesting.
@@ -131,7 +131,7 @@ The backend is **provider-agnostic** via the OpenAI SDK. `base_url` is configura
 - **`messages` shape**: a `system` message with the prompt content, followed by a `user` message containing the `<context>...</context>` block plus the question.
 - **Streaming.** Off in eval (we need the whole answer for grading); enabling streaming in CLI/UI is a small follow-up.
 
-A side benefit of the OpenAI-compatible abstraction: the LLM-as-judge step in Phase 4b reuses the same `Generator` class (different `model` and `prompt_path`) regardless of where the judge ultimately runs.
+A side benefit of the OpenAI-compatible abstraction: the LLM-as-judge step reuses the same `Generator` class (different `model` and `prompt_path`) regardless of where the judge ultimately runs.
 
 ---
 
@@ -147,7 +147,7 @@ A side benefit of the OpenAI-compatible abstraction: the LLM-as-judge step in Ph
 **Why not just (1).** Threshold-only refusal can't catch cases where retrieval surfaces a related-but-inadequate FAQ — only the model can read the entry and decide it doesn't answer the question.
 
 **Evaluation plan.**
-- Eval set includes **15–20 out-of-scope cases** mixed with 50–80 in-scope cases (target total: 80–100, per CLAUDE.md).
+- Eval set includes **15–20 out-of-scope cases** mixed with 50–80 in-scope cases (target total: 80–100).
 - Out-of-scope subset spans: (a) clearly unrelated ("recipe for risotto"), (b) adjacent but uncovered ("how do I file my taxes in Belgium?"), (c) in-domain but uncovered angle ("are there penalties for missing Article 8 disclosures?").
 - Metrics: **refusal precision** (of all model refusals, fraction that were genuinely OOS) and **refusal recall** (of all OOS questions, fraction the system correctly refused). Track both `tau_low`-only refusals and model-driven refusals separately to attribute behaviour.
 - Calibrate `tau_low` per embedding model on a held-out slice of the OOS subset; this is one of the few hyperparameters that legitimately needs tuning.
@@ -165,7 +165,7 @@ Per-query, order-of-magnitude. Assume ~80-token user question, ~3,000 tokens of 
 
 Index build cost (one-off): ~200k tokens × $0.18/1M = **~$0.04 with Voyage**, $0 local. Negligible.
 
-Eval cost: 100 cases × ~$0.0006 × ~12 configs = **<$1 total** for the full matrix at `gpt-4o-mini` rates. Pricier providers (e.g. `gpt-4o`, `claude-3.5-sonnet` via OpenRouter) scale linearly; budget accordingly.
+Eval cost: ≈$0.10 per `--full` config = **<$1 total** for the full matrix at `gpt-4o-mini` rates. Pricier providers (e.g. `gpt-4o`, `claude-3.5-sonnet` via OpenRouter) scale linearly; budget accordingly.
 
 Latency dominator is the LLM call, not retrieval. Worth knowing — retrieval optimisation has a tiny ceiling.
 
@@ -175,7 +175,7 @@ Latency dominator is the LLM call, not retrieval. Worth knowing — retrieval op
 
 **Trigger:** Fine-tune `bge-small-en-v1.5` on synthetic question→FAQ pairs **if and only if**:
 
-> **The best-performing non-fine-tuned variant** (any combination of chunking + embedding + retrieval + reranker) achieves **hit@5 < 0.85** on the **golden-path eval subset** (the in-scope subset, ~50–80 cases) **AND** the gap to the next-best variant is < 2 percentage points (i.e. we've plateaued, not just chosen a bad config).
+> **The best-performing non-fine-tuned variant** (any combination of chunking + embedding + retrieval + reranker) achieves **hit@5 < 0.85** on the **in-scope eval subset** (~50–80 cases) **AND** the gap to the next-best variant is < 2 percentage points (i.e. we've plateaued, not just chosen a bad config).
 
 If hit@5 ≥ 0.85, fine-tune is **skipped** — the marginal lift cannot justify the engineering cost, and generation quality (faithfulness, refusal) becomes the bottleneck instead.
 
@@ -198,8 +198,7 @@ If hit@5 ≥ 0.85, fine-tune is **skipped** — the marginal lift cannot justify
 6. **Rerank** (if enabled) with `bge-reranker-v2-m3`: score `(query, chunk_text)` pairs, take top-5.
 7. **Assemble context.** Format top-5 chunks as `<context><doc id="…" section="…">…text…</doc>…</context>`, preserving section heading and question line so the model can cite.
 8. **Generate.** Call the configured OpenAI-compatible chat-completions endpoint (default `gpt-4o-mini`) with the system prompt + user message containing context + question. `max_tokens=600`, `temperature=0`. Prefix caching, where the provider supports it, is automatic.
-9. **Post-process.** Light validation: did the model produce the citation block? If not (rare at temperature 0), regenerate once with an explicit "remember to cite" suffix, then return whatever comes out.
-10. **Return** answer text + cited chunk IDs (for UI display and eval logging).
+9. **Return** answer text + cited chunk IDs (for UI display and eval logging).
 
 ---
 
