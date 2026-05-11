@@ -1,6 +1,6 @@
 # 01 — RAG Architecture for the EU Taxonomy FAQ Chatbot
 
-Design document for the Sopra Steria NLP take-home. Audience: reviewers reading the
+Design document for a RAG evaluation case study. Audience: reviewers reading the
 codebase top-to-bottom. Scope: single-shot Q&A over `docs/taxonomy_faqs_cleaned.md`.
 
 **Corpus shape (measured, not assumed):**

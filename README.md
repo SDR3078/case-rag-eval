@@ -1,7 +1,7 @@
 # EU Taxonomy FAQ RAG Chatbot
 
 A single-shot retrieval-augmented Q&A bot over the EU Taxonomy Navigator FAQs
-(329 entries across 7 sections). Built for the Sopra Steria NLP take-home.
+(329 entries across 7 sections). Built as a RAG evaluation case study.
 
 The build prioritises a thorough experimentation matrix and a defensible
 eval: 80 hand-curated cases × **10 retrieval configs** with full retrieval
